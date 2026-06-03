@@ -579,6 +579,18 @@ def anthropic_messages_handler(
             cache_control_ttl=_deployment_supports_cache_control_ttl(kwargs.get("model_info")),
         )
     if anthropic_messages_provider_config is None:
+        # Protocol strict-mode guard: block cross-protocol conversion when enabled.
+        from litellm.protocol_routing import (
+            check_strict_protocol_for_provider,
+            SupportedProtocol,
+        )
+
+        check_strict_protocol_for_provider(
+            provider=custom_llm_provider,
+            requested_protocol=SupportedProtocol.ANTHROPIC_MESSAGES,
+            model=model,
+        )
+
         # Route to Responses API for OpenAI / Azure, chat/completions for everything else.
         if kwargs.get("compaction") is None and _should_route_to_responses_api(
             custom_llm_provider, original_model, model
