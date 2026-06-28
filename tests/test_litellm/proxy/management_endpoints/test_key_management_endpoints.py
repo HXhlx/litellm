@@ -9877,6 +9877,40 @@ class TestKeyOwnerPrivilegeEscalation:
         mock_check.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_budget_admin_can_resend_unchanged_budget_above_own_ceiling_on_update(self):
+        budget_limits = [{"budget_duration": "1d", "max_budget": 100.0}]
+        data = UpdateKeyRequest(
+            key="sk-test",
+            max_budget=100.0,
+            budget_limits=budget_limits,
+            rpm_limit=500,
+        )
+        existing = self._make_existing_key(created_by="creator-123")
+        existing.max_budget = 100.0
+        existing.budget_limits = json.dumps(budget_limits)
+        auth = UserAPIKeyAuth(
+            user_id="creator-123",
+            user_role=LitellmUserRoles.INTERNAL_USER,
+            max_budget=10.0,
+        )
+
+        mock_check = AsyncMock()
+        with patch(
+            "litellm.proxy.management_endpoints.key_management_endpoints._check_key_admin_access",
+            mock_check,
+        ):
+            await _validate_update_key_data(
+                data=data,
+                existing_key_row=existing,
+                user_api_key_dict=auth,
+                llm_router=None,
+                premium_user=False,
+                prisma_client=AsyncMock(),
+                user_api_key_cache=MagicMock(),
+            )
+        mock_check.assert_called_once()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("cleared_value", [[], None])
     async def test_creator_cannot_clear_own_budget_limits(self, cleared_value):
         """Clearing budget_limits is a budget change and requires admin."""

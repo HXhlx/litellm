@@ -638,6 +638,33 @@ def _check_budget_limits_delegation_ceiling(
         )
 
 
+def _normalize_budget_limits_for_comparison(budget_limits: Any) -> Any:
+    if isinstance(budget_limits, str):
+        try:
+            return _normalize_budget_limits_for_comparison(json.loads(budget_limits))
+        except json.JSONDecodeError:
+            return budget_limits
+    if isinstance(budget_limits, BudgetLimitEntry):
+        return _normalize_budget_limits_for_comparison(budget_limits.model_dump(mode="json", exclude_none=True))
+    if isinstance(budget_limits, list):
+        return [_normalize_budget_limits_for_comparison(budget_limit) for budget_limit in budget_limits]
+    if isinstance(budget_limits, dict):
+        return {
+            key: _normalize_budget_limits_for_comparison(value)
+            for key, value in budget_limits.items()
+            if value is not None
+        }
+    return budget_limits
+
+
+def _budget_limits_changed_on_update(data: UpdateKeyRequest, existing_key_row: Any) -> bool:
+    if "budget_limits" not in data.model_fields_set:
+        return False
+    return _normalize_budget_limits_for_comparison(data.budget_limits) != _normalize_budget_limits_for_comparison(
+        getattr(existing_key_row, "budget_limits", None)
+    )
+
+
 async def validate_team_id_used_in_service_account_request(
     team_id: Optional[str],
     prisma_client: Optional[PrismaClient],
@@ -2109,6 +2136,7 @@ async def _process_single_key_update(
 
     _check_update_delegation_ceiling(
         data=update_key_request,
+        existing_key_row=existing_key_row,
         team_table=team_obj,
         user_api_key_dict=user_api_key_dict,
     )
@@ -2220,6 +2248,7 @@ async def _validate_mcp_servers_for_key_update(
 
 def _check_update_delegation_ceiling(
     data: UpdateKeyRequest,
+    existing_key_row: Any,
     team_table: Optional[LiteLLM_TeamTableCachedObj],
     user_api_key_dict: UserAPIKeyAuth,
 ) -> None:
@@ -2241,11 +2270,13 @@ def _check_update_delegation_ceiling(
         if user_api_key_dict.max_budget is not None
         else (team_table.max_budget if user_api_key_dict.is_session_token and team_table is not None else None)
     )
+    max_budget_changed = data.max_budget is not None and data.max_budget != getattr(existing_key_row, "max_budget", None)
+    budget_limits_changed = _budget_limits_changed_on_update(data=data, existing_key_row=existing_key_row)
     if (
         user_api_key_dict.is_session_token
         and user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN.value
         and not is_ui_session_team_key
-        and data.max_budget is not None
+        and max_budget_changed
         and team_table is None
     ):
         raise HTTPException(
@@ -2260,7 +2291,7 @@ def _check_update_delegation_ceiling(
     if (
         user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN.value
         and not is_ui_session_team_key
-        and data.max_budget is not None
+        and max_budget_changed
         and delegation_ceiling is not None
         and data.max_budget > delegation_ceiling
     ):
@@ -2273,7 +2304,7 @@ def _check_update_delegation_ceiling(
             },
         )
     _check_budget_limits_delegation_ceiling(
-        budget_limits=data.budget_limits,
+        budget_limits=data.budget_limits if budget_limits_changed else None,
         delegation_ceiling=delegation_ceiling,
         user_api_key_dict=user_api_key_dict,
         is_ui_session_team_key=is_ui_session_team_key,
@@ -2433,6 +2464,7 @@ async def _validate_update_key_data(
 
     _check_update_delegation_ceiling(
         data=data,
+        existing_key_row=existing_key_row,
         team_table=team_obj,
         user_api_key_dict=user_api_key_dict,
     )
