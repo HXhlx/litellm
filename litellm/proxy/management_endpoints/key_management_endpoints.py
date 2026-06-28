@@ -1621,6 +1621,8 @@ async def generate_key_fn(
                         user_api_key_dict=user_api_key_dict, team_obj=team_table
                     )
                 ),
+                scope_team_id=getattr(team_table, "team_id", None),
+                scope_org_id=getattr(team_table, "organization_id", None),
             )
 
         if team_table is not None:
@@ -1831,6 +1833,8 @@ async def generate_service_account_key_fn(
                     user_api_key_dict=user_api_key_dict, team_obj=team_table
                 )
             ),
+            scope_team_id=getattr(team_table, "team_id", None),
+            scope_org_id=getattr(team_table, "organization_id", None),
         )
 
     data.user_id = None  # do not allow user_id to be set for service account keys
@@ -2685,6 +2689,8 @@ async def update_key_fn(
                     )
                 ),
                 existing_metadata=_existing_key_metadata,
+                scope_team_id=getattr(_key_team, "team_id", None),
+                scope_org_id=getattr(_key_team, "organization_id", None),
             )
 
         await _validate_update_key_data(
@@ -4904,6 +4910,8 @@ async def regenerate_key_fn(
                     )
                 ),
                 existing_metadata=_regen_existing_metadata,
+                scope_team_id=getattr(regenerate_team_table, "team_id", None),
+                scope_org_id=getattr(regenerate_team_table, "organization_id", None),
             )
 
         verbose_proxy_logger.info(

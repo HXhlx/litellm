@@ -1,10 +1,14 @@
 """Validation for admin-owned logging-exporter assignment on key/team/org.
 
 An identity's ``metadata.logging_exporters`` binds it to admin-owned trace
-destinations. Every name must be a registered logging credential, and the
-caller must hold a role that authorizes the write (proxy admin always; team
-admin and org admin in specific contexts). The resolver
-(``litellm_pre_call_utils``) trusts this gate at request time.
+destinations. Every name must be a registered logging credential, the caller must
+hold a role that authorizes the write (proxy admin always; team admin and org admin
+in specific contexts), AND a non-proxy-admin may only name destinations whose
+``credential_info.access`` makes them visible to the scope being written (the key's
+team, or the team/org being updated). Visibility and enablement are separate: a
+destination granted to a team is assignable by that team's admin, but assigning it is
+what enables it. The resolver (``litellm_pre_call_utils``) re-checks visibility at
+request time, so this gate and the resolver agree on what "visible" means.
 """
 
 from typing import Optional
@@ -13,6 +17,10 @@ from fastapi import HTTPException, status
 
 import litellm
 from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
+from litellm.proxy.management_endpoints.logging_exporter_access import (
+    access_grants,
+    is_auto_enable,
+)
 
 LOGGING_EXPORTERS_KEY = "logging_exporters"
 
@@ -62,12 +70,53 @@ def validate_credential_access(credential_info: Optional[dict]) -> None:
             )
 
 
-def _logging_credential_names() -> set:
+def _logging_credentials_by_name() -> dict[str, dict]:
     return {
-        credential.credential_name
+        credential.credential_name: (credential.credential_info or {})
         for credential in litellm.credential_list
         if (credential.credential_info or {}).get("credential_type") == "logging"
     }
+
+
+def _logging_credential_names() -> set[str]:
+    return set(_logging_credentials_by_name())
+
+
+def _reject_unassignable_destinations(
+    exporters: list[str],
+    *,
+    scope_team_id: Optional[str],
+    scope_org_id: Optional[str],
+) -> None:
+    """Reject names a non-proxy-admin cannot assign in this scope.
+
+    A destination is assignable when it is an explicit global/default
+    (``auto_enable``) or its ``access`` grants the scope being written (the key's
+    team, or the team/org being updated). Names are already known logging
+    credentials by the time this runs, so a missing entry means a benign race; we
+    fail closed on it.
+    """
+    by_name = _logging_credentials_by_name()
+    unassignable = [
+        name
+        for name in exporters
+        if not (
+            is_auto_enable(by_name.get(name))
+            or access_grants(
+                (by_name.get(name) or {}).get("access"), scope_team_id, scope_org_id
+            )
+        )
+    ]
+    if unassignable:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": (
+                    "You can only assign logging destinations granted to your team "
+                    f"or organization. Not granted: {unassignable}"
+                )
+            },
+        )
 
 
 def _validate_exporters_shape_and_names(exporters: object) -> None:
@@ -133,6 +182,8 @@ def validate_logging_exporter_assignment(
     caller_is_team_admin: bool = False,
     caller_is_org_admin: bool = False,
     existing_metadata: Optional[dict] = None,
+    scope_team_id: Optional[str] = None,
+    scope_org_id: Optional[str] = None,
 ) -> None:
     """Validate a ``metadata.logging_exporters`` write on key / team / org endpoints.
 
@@ -143,6 +194,13 @@ def validate_logging_exporter_assignment(
     - ``/team/update``: pass ``caller_is_org_admin`` from the loaded team's org.
     - ``/key/generate``/``/key/update``: pass both flags from the key's team.
     - ``/team/new``/``/organization/*``: pass neither (proxy-admin only).
+
+    ``scope_team_id``/``scope_org_id`` are the team and org the write lands in (the
+    key's team, or the team/org being updated). A non-proxy-admin may only name
+    destinations visible to that scope: this is what stops a team admin from routing a
+    key's traces to a destination scoped to a different team. Proxy admins skip the
+    scope check; they can assign anything, but the resolver still only fires a named
+    destination for identities it is visible to.
 
     Update paths replace stored metadata wholesale, so a caller can drop an
     admin-assigned exporter by sending ``metadata`` without
@@ -171,3 +229,7 @@ def validate_logging_exporter_assignment(
     )
     if requested is not None:
         _validate_exporters_shape_and_names(requested)
+        if not is_proxy_admin:
+            _reject_unassignable_destinations(
+                requested, scope_team_id=scope_team_id, scope_org_id=scope_org_id
+            )

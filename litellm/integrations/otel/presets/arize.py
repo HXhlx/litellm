@@ -25,21 +25,30 @@ class _ArizeSettings(BaseSettings):
 def arize_preset(
     *,
     config_overrides: OpenTelemetryV2Config | None = None,
+    allow_missing_credentials: bool = False,
 ) -> OpenTelemetryV2Config:
     arize_cfg = _V1ArizeLogger.get_arize_config()
     headers = _arize_headers(arize_cfg)
     base = config_overrides or OpenTelemetryV2Config()
+    # Contribute the global Arize exporter only when Arize credentials are
+    # configured. Without them it points at the Arize cloud with no auth and every
+    # export fails PERMISSION_DENIED; admin-owned destinations carry their own
+    # credentials and are appended by the router instead.
+    global_exporter = (
+        (
+            ExporterSpec(
+                kind=arize_cfg.protocol or "otlp_grpc",
+                endpoint=arize_cfg.endpoint or "https://otlp.arize.com/v1",
+                headers=headers,
+                owner=ExporterOwner.ARIZE_AX,
+            ),
+        )
+        if headers
+        else ()
+    )
     return base.model_copy(
         update={
-            "exporters": [
-                *base.exporters,
-                ExporterSpec(
-                    kind=arize_cfg.protocol or "otlp_grpc",
-                    endpoint=arize_cfg.endpoint or "https://otlp.arize.com/v1",
-                    headers=headers,
-                    owner=ExporterOwner.ARIZE_AX,
-                ),
-            ],
+            "exporters": [*base.exporters, *global_exporter],
             "mapper_names": ensure_mappers(base.mapper_names, "openinference"),
             "resource_attributes": {
                 **base.resource_attributes,

@@ -357,3 +357,146 @@ def test_logger_filters_destinations_to_its_backend():
 
     got = OpenTelemetryV2._destinations_for_backend(_Shim(), event)
     assert [d.endpoint for d in got] == ["https://lf/api/public/otel"]
+
+
+# --- multi-destination, same-backend: group by Resource so each gets its span -- #
+#
+# A backend that selects its target FROM the Resource (Arize's project) needs a
+# differently-tagged span per destination, because a span carries exactly one
+# Resource (a TracerProvider property). Pre-fix the gen-AI clone folded every
+# destination into ONE last-wins Resource, so two Arize projects collapsed to one
+# and only that project received the gen-AI span. ``tracers_for`` groups by
+# ``destination_resource_attrs`` and returns one tracer (one provider, one Resource)
+# per distinct group. Header-routed backends declare no Resource attrs, so they stay
+# in one group with multiple exporters and keep routing by per-exporter auth.
+
+
+def _arize_dest(project, space="S", key="K"):
+    return OtelDestination(
+        endpoint="https://otlp.arize.com/v1",
+        headers={"space_id": space, "api_key": key},
+        callback_name="arize",
+        resource_attributes={"model_id": project, "arize.project.name": project},
+    )
+
+
+def _provider_project(provider):
+    return provider.resource.attributes.get("arize.project.name")
+
+
+def test_tracers_for_empty_returns_default_only():
+    cache = _cache("arize")
+    default = NoOpTracer()
+    assert cache.tracers_for(default, ()) == (default,)
+    assert cache._providers == {}
+
+
+def test_tracers_for_single_destination_one_group():
+    """No regression: a single Arize destination yields one tracer/provider carrying
+    its project (same as the old single-merged path)."""
+    cache = _cache("arize")
+    tracers = cache.tracers_for(NoOpTracer(), (_arize_dest("solo"),))
+    assert len(tracers) == 1
+    assert {_provider_project(p) for p in cache._providers.values()} == {"solo"}
+
+
+def test_tracers_for_two_arize_projects_split_into_separate_groups():
+    """The fix: two Arize destinations with different Resource attrs must NOT
+    last-wins merge -- each project gets its own provider/Resource so each receives a
+    correctly-tagged gen-AI span."""
+    cache = _cache("arize")
+    tracers = cache.tracers_for(
+        NoOpTracer(), (_arize_dest("projA"), _arize_dest("projB"))
+    )
+    assert len(tracers) == 2  # one tracer per project group
+    assert {_provider_project(p) for p in cache._providers.values()} == {
+        "projA",
+        "projB",
+    }
+
+
+def test_two_arize_projects_each_provider_has_its_own_single_project():
+    """Each group's Resource carries exactly its own project (not the other's, not a
+    merge)."""
+    cache = _cache("arize")
+    cache.tracers_for(NoOpTracer(), (_arize_dest("projA"), _arize_dest("projB")))
+    by_project = {
+        _provider_project(p): p.resource.attributes for p in cache._providers.values()
+    }
+    assert by_project["projA"]["model_id"] == "projA"
+    assert by_project["projB"]["model_id"] == "projB"
+
+
+def test_header_routed_destinations_stay_one_group_with_two_exporters():
+    """Langfuse/Weave declare no Resource attrs, so two distinct destinations collapse
+    into ONE group (one provider) with one exporter each -- they route by per-exporter
+    auth, so no per-Resource split is needed or wanted."""
+    cache = _cache(
+        "langfuse_otel",
+        exporters=[
+            ExporterSpec(kind="otlp_http", endpoint="https://env/v1", owner=None)
+        ],
+    )
+    tracers = cache.tracers_for(
+        NoOpTracer(),
+        (_dest("https://a/v1", "Basic A"), _dest("https://b/v1", "Basic B")),
+    )
+    assert len(tracers) == 1  # single empty-Resource group
+    assert len(cache._providers) == 1
+    (provider,) = cache._providers.values()
+    endpoints = " ".join(
+        str(getattr(getattr(sp, "span_exporter", None), "_endpoint", ""))
+        for sp in provider._active_span_processor._span_processors
+    )
+    # global + both destinations all live on the one provider (OTLP normalizes the
+    # endpoint by appending /v1/traces, so match on the host+path prefix)
+    assert "https://a/v1" in endpoints and "https://b/v1" in endpoints
+
+
+def test_base_exporters_attach_to_first_group_only():
+    """When a backend splits into multiple Resource groups, the configured/global
+    exporters must ride exactly ONE group, so the global receives the gen-AI span once
+    rather than once per project."""
+    cache = _cache(
+        "arize",
+        exporters=[ExporterSpec(kind="in_memory", endpoint=None, owner=None)],
+    )
+    cache.tracers_for(NoOpTracer(), (_arize_dest("projA"), _arize_dest("projB")))
+    base_counts = {}
+    for provider in cache._providers.values():
+        project = _provider_project(provider)
+        base_counts[project] = sum(
+            type(getattr(sp, "span_exporter", sp)).__name__ == "InMemorySpanExporter"
+            for sp in provider._active_span_processor._span_processors
+        )
+    # exactly one group carries the global in_memory exporter; the other carries none
+    assert sorted(base_counts.values()) == [0, 1]
+
+
+def test_generic_backend_resolves_generic_destination():
+    """A Generic OTLP destination (callback_name='generic') must be picked up by the
+    generic OpenTelemetryV2 logger, so its gen-AI span routes to the destination's
+    otel_endpoint. Regression: 'generic' had no preset, so no generic logger existed and
+    the gen-AI span was dropped (only proxy-internal spans fanned out)."""
+    from litellm.integrations.otel.logger import OpenTelemetryV2
+
+    event = _event(
+        [
+            {
+                "callback_name": "generic",
+                "endpoint": "http://collector:4318",
+                "headers": {"x-tenant": "t1"},
+            },
+            {
+                "callback_name": "arize",
+                "endpoint": "https://otlp.arize.com/v1",
+                "headers": {"space_id": "S"},
+            },
+        ]
+    )
+
+    class _Shim:
+        callback_name = "generic"
+
+    got = OpenTelemetryV2._destinations_for_backend(_Shim(), event)
+    assert [d.endpoint for d in got] == ["http://collector:4318"]

@@ -143,15 +143,14 @@ def test_header_routed_backends_declare_no_resource_attrs():
         assert dest.resource_attributes == {}
 
 
-def test_weave_requires_endpoint_and_key():
-    assert build_destination("weave_otel", {"wandb_api_key": "w"}) is None
+def test_weave_requires_only_api_key_and_defaults_endpoint():
+    # No API key -> nothing.
+    assert build_destination("weave_otel", {}) is None
+    # The API key alone is enough: Weave cloud's endpoint is fixed, so it defaults
+    # to the cloud OTLP path and the endpoint field is optional.
     dest = build_destination(
         "weave_otel",
-        {
-            "wandb_api_key": "w",
-            "weave_endpoint": "https://trace.wandb.ai/otel/v1/traces",
-            "weave_project_id": "entity/project",
-        },
+        {"wandb_api_key": "w", "weave_project_id": "entity/project"},
     )
     assert dest is not None
     assert dest.endpoint == "https://trace.wandb.ai/otel/v1/traces"
@@ -180,3 +179,34 @@ def test_registry_lists_the_first_class_backends():
     assert OTEL_V2_DESTINATION_CALLBACKS == frozenset(
         {"langfuse_otel", "arize", "weave_otel"}
     )
+
+
+def test_endpoint_whitespace_is_trimmed():
+    # A stray leading/trailing space in the endpoint (an easy create-form slip)
+    # makes a malformed OTLP URL the exporter rejects with a 404, so values are
+    # trimmed before the destination is built.
+    dest = build_destination(
+        "some_collector",
+        {"otel_endpoint": "  https://collector.internal:4318/v1/traces  "},
+    )
+    assert dest is not None
+    assert dest.endpoint == "https://collector.internal:4318/v1/traces"
+
+
+def test_weave_endpoint_completed_to_otel_path():
+    # Weave's OTLP path is /otel/v1/traces, not the bare /v1/traces the generic
+    # exporter would append; a host must be completed here or the export 404s.
+    # Idempotent when the full path or the /otel prefix is already supplied.
+    for given, expected in (
+        ("https://trace.wandb.ai", "https://trace.wandb.ai/otel/v1/traces"),
+        ("https://trace.wandb.ai/otel", "https://trace.wandb.ai/otel/v1/traces"),
+        (
+            "https://trace.wandb.ai/otel/v1/traces",
+            "https://trace.wandb.ai/otel/v1/traces",
+        ),
+    ):
+        dest = build_destination(
+            "weave_otel", {"wandb_api_key": "w", "weave_endpoint": given}
+        )
+        assert dest is not None
+        assert dest.endpoint == expected

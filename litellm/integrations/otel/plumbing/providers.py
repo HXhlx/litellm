@@ -105,8 +105,15 @@ def _otlp_traces_endpoint(endpoint: str | None) -> str | None:
     if not endpoint:
         return endpoint
     endpoint = endpoint.rstrip("/")
-    # Splunk Observability uses ``/v2/trace/otlp``; never rewrite it.
-    if endpoint.endswith("/v1/traces") or "/v2/trace/otlp" in endpoint:
+    # Some vendors expose a complete traces ingest path that is NOT the OTLP-standard
+    # ``/v1/traces`` base: Splunk Observability uses ``/v2/trace/otlp`` and Langtrace
+    # ingests at ``/api/trace``. Appending ``/v1/traces`` to those 404s, so never
+    # rewrite them.
+    if (
+        endpoint.endswith("/v1/traces")
+        or "/v2/trace/otlp" in endpoint
+        or endpoint.endswith("/api/trace")
+    ):
         return endpoint
     for other_signal in ("/v1/logs", "/v1/metrics"):
         if endpoint.endswith(other_signal):
@@ -324,6 +331,7 @@ def build_tracer_provider(
     baggage_processor: SpanProcessor | None = None,
     use_simple_processor: bool | None = None,
     tenant_fan_out_owner: str | None = None,
+    attach_tenant_fan_out: bool = False,
 ) -> TracerProvider:
     """Build the shared :class:`TracerProvider`.
 
@@ -333,12 +341,16 @@ def build_tracer_provider(
     backends. ``exporter`` and ``use_simple_processor`` are explicit overrides:
     pass a single exporter to attach exactly that one (used by tests).
 
-    ``tenant_fan_out_owner`` — when set, attach a ``TenantFanOutSpanProcessor``
-    that forwards each finished span to the admin-resolved per-tenant
-    destinations whose ``callback_name`` matches the owner. Only the MAIN v2
-    logger provider opts in; the per-tenant clone providers (built by
-    ``TenantTracerCache``) intentionally do not, so the LLM-call span exported
-    through them is not also fanned out here.
+    ``attach_tenant_fan_out`` — attach a ``TenantFanOutSpanProcessor`` that forwards
+    each finished proxy-internal span (FastAPI server, ``auth`` phase, DB lookups, the
+    cost ledger) to the request's admin-resolved destinations. The MAIN v2 logger
+    provider always opts in, EVEN when no backend is named (the generic global logger
+    published for a destination-only deployment) -- otherwise the server span never
+    reaches the destination and its gen-AI child is orphaned. ``tenant_fan_out_owner``
+    is the owning backend name when one exists; it is informational (the fan-out skips
+    the gen-AI span by attribute and forwards internal spans to every destination).
+    The per-tenant clone providers (built by ``TenantTracerCache``) pass neither, so
+    the LLM-call span exported through them is not also fanned out here.
     """
     provider = TracerProvider(resource=build_resource(config))
     if baggage_processor is None:
@@ -347,7 +359,7 @@ def build_tracer_provider(
         )
     provider.add_span_processor(baggage_processor)
 
-    if tenant_fan_out_owner is not None:
+    if attach_tenant_fan_out or tenant_fan_out_owner is not None:
         from litellm.integrations.otel.plumbing.fan_out import (
             TenantFanOutSpanProcessor,
         )

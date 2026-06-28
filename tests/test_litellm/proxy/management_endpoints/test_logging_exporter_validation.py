@@ -29,12 +29,34 @@ from litellm.proxy.management_endpoints.logging_exporter_validation import (
 def _registry():
     original = litellm.credential_list
     litellm.credential_list = [
+        # global: visible to (and assignable by) every scope.
         CredentialItem(
             credential_name="langfuse-eu",
             credential_values={},
             credential_info={
                 "credential_type": "logging",
                 "description": "langfuse_otel",
+                "access": {"global": True},
+            },
+        ),
+        # scoped to one team / one org: assignable only within that scope.
+        CredentialItem(
+            credential_name="arize-ds",
+            credential_values={},
+            credential_info={
+                "credential_type": "logging",
+                "description": "arize",
+                "access": {"teams": ["ds-team"], "orgs": ["ds-org"]},
+            },
+        ),
+        # explicit global/default: assignable by anyone via the auto_enable escape.
+        CredentialItem(
+            credential_name="central-default",
+            credential_values={},
+            credential_info={
+                "credential_type": "logging",
+                "description": "arize",
+                "auto_enable": True,
             },
         ),
         CredentialItem(
@@ -111,6 +133,85 @@ def test_proxy_admin_overrides_falsy_flags(_registry):
         _admin(),
         caller_is_team_admin=False,
         caller_is_org_admin=False,
+    )
+
+
+# --- Scope checks: a non-proxy-admin may only name destinations granted to them -
+
+
+def test_team_admin_can_assign_destination_granted_to_their_team(_registry):
+    """arize-ds is granted to ds-team; a team admin writing in ds-team's scope may
+    name it."""
+    validate_logging_exporter_assignment(
+        _ok(["arize-ds"]),
+        _non_admin(),
+        caller_is_team_admin=True,
+        scope_team_id="ds-team",
+    )
+
+
+def test_team_admin_cannot_assign_destination_not_granted_to_their_team(_registry):
+    """The headline leak: a team admin of another team names ds-team's destination.
+    Pre-fix this passed (only the name was checked); now it is a 403."""
+    with pytest.raises(HTTPException) as exc:
+        validate_logging_exporter_assignment(
+            _ok(["arize-ds"]),
+            _non_admin(),
+            caller_is_team_admin=True,
+            scope_team_id="platform-team",
+        )
+    assert exc.value.status_code == 403
+
+
+def test_org_admin_can_assign_destination_granted_to_their_org(_registry):
+    validate_logging_exporter_assignment(
+        _ok(["arize-ds"]),
+        _non_admin(),
+        caller_is_org_admin=True,
+        scope_org_id="ds-org",
+    )
+
+
+def test_org_admin_cannot_assign_destination_not_granted_to_their_org(_registry):
+    with pytest.raises(HTTPException) as exc:
+        validate_logging_exporter_assignment(
+            _ok(["arize-ds"]),
+            _non_admin(),
+            caller_is_org_admin=True,
+            scope_org_id="other-org",
+        )
+    assert exc.value.status_code == 403
+
+
+def test_proxy_admin_can_assign_any_destination(_registry):
+    """Proxy admin skips the scope check entirely; arize-ds is granted to no scope
+    the admin is in, yet the write is allowed."""
+    validate_logging_exporter_assignment(
+        _ok(["arize-ds"]),
+        _admin(),
+        scope_team_id="platform-team",
+    )
+
+
+def test_team_admin_can_assign_auto_enable_default(_registry):
+    """An explicit global/default (auto_enable) is assignable by any admin scope,
+    the way a global destination is."""
+    validate_logging_exporter_assignment(
+        _ok(["central-default"]),
+        _non_admin(),
+        caller_is_team_admin=True,
+        scope_team_id="platform-team",
+    )
+
+
+def test_team_admin_can_assign_global_destination(_registry):
+    """access.global makes a destination visible to every scope, so a team admin
+    in any team may name it."""
+    validate_logging_exporter_assignment(
+        _ok(["langfuse-eu"]),
+        _non_admin(),
+        caller_is_team_admin=True,
+        scope_team_id="platform-team",
     )
 
 

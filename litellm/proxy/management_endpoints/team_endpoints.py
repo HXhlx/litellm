@@ -1052,6 +1052,7 @@ async def new_team(
                     user_api_key_dict=user_api_key_dict,
                     organization_id=data.organization_id,
                 ),
+                scope_org_id=data.organization_id,
             )
 
         if prisma_client is None:
@@ -1824,6 +1825,8 @@ async def update_team(
                     user_api_key_dict=user_api_key_dict, team_obj=team_for_auth
                 ),
                 existing_metadata=existing_team_metadata,
+                scope_team_id=getattr(team_for_auth, "team_id", None),
+                scope_org_id=getattr(team_for_auth, "organization_id", None),
             )
 
         _check_passthrough_routes_caller_permission(

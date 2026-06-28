@@ -215,13 +215,18 @@ export interface CredentialItem {
     credential_type?: string;
     // Non-secret destination host/endpoint, surfaced in the logging credentials list.
     host?: string;
-    // Admin-owned access grant for a logging destination: which identities its
-    // traces fan out to. global reaches everyone; teams/orgs list ids.
+    // Admin-owned access grant for a logging destination: who may see/assign it.
+    // global reaches everyone; teams/orgs list ids. Visibility only -- on its own it
+    // never enables tracing for a request.
     access?: {
       global?: boolean;
       teams?: string[];
       orgs?: string[];
     };
+    // Explicit global/default: when true the destination exports on every request
+    // without being named on any key/team/org. The deliberate replacement for the
+    // old behavior where access.global implicitly auto-enabled.
+    auto_enable?: boolean;
   };
 }
 

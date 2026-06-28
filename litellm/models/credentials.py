@@ -76,3 +76,4 @@ class CredentialInfo(BaseModel):
     host: Optional[str] = None
     endpoint: Optional[str] = None
     access: Optional[CredentialAccess] = None
+    auto_enable: bool = False

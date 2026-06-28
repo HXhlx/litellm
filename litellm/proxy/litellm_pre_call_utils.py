@@ -540,15 +540,46 @@ class KeyAndTeamLoggingSettings:
         return None
 
 
-async def _union_logging_exporter_names(user_api_key_dict: UserAPIKeyAuth) -> set:
+async def _effective_org_id(user_api_key_dict: UserAPIKeyAuth) -> Optional[str]:
+    """The org this request belongs to, falling back to the team's org when the token
+    carries none. Team keys frequently have no ``org_id`` on the token, so without this
+    an org-scoped destination would be invisible at request time even though the write
+    gate (which loads the team) accepted it. Mirrors the fallback in ``_check_org_budget``.
+    """
+    if user_api_key_dict.org_id is not None:
+        return user_api_key_dict.org_id
+    team_id = user_api_key_dict.team_id
+    if team_id is None:
+        return None
+    from litellm.proxy import proxy_server
+    from litellm.proxy.auth.auth_checks import get_team_object
+
+    if proxy_server.prisma_client is None:
+        return None
+    try:
+        team_obj = await get_team_object(
+            team_id=team_id,
+            prisma_client=proxy_server.prisma_client,
+            user_api_key_cache=proxy_server.user_api_key_cache,
+            parent_otel_span=getattr(user_api_key_dict, "parent_otel_span", None),
+            check_db_only=True,
+        )
+    except HTTPException:
+        return None
+    return getattr(team_obj, "organization_id", None)
+
+
+async def _union_logging_exporter_names(
+    user_api_key_dict: UserAPIKeyAuth, org_id: Optional[str]
+) -> set:
     """The union of admin-assigned exporter names across the request's identity chain.
 
     Resolves each level from its OWN record: the key's ``metadata`` is shadowed by the
     team's on the auth object, so it is fetched fresh via ``get_key_object``; the org's
-    metadata is fetched via ``get_org_object``; the team's is already its own on
-    ``team_metadata``. Internal-user is intentionally not a routing dimension. The lists
-    are admin-owned; the request never supplies them. Degrades to team-only when no DB
-    is connected (SDK mode).
+    metadata is fetched via ``get_org_object`` using the effective ``org_id`` (token org
+    or team fallback); the team's is already its own on ``team_metadata``. Internal-user
+    is intentionally not a routing dimension. The lists are admin-owned; the request
+    never supplies them. Degrades to team-only when no DB is connected (SDK mode).
     """
     from litellm.proxy import proxy_server
     from litellm.proxy.auth.auth_checks import get_key_object, get_org_object
@@ -584,10 +615,10 @@ async def _union_logging_exporter_names(user_api_key_dict: UserAPIKeyAuth) -> se
     _add(user_api_key_dict.team_metadata)
 
     # ORG: the org's own metadata (central catch-all).
-    if user_api_key_dict.org_id and prisma_client is not None:
+    if org_id and prisma_client is not None:
         try:
             org_obj = await get_org_object(
-                org_id=user_api_key_dict.org_id,
+                org_id=org_id,
                 prisma_client=prisma_client,
                 user_api_key_cache=cache,
                 parent_otel_span=span,
@@ -600,48 +631,40 @@ async def _union_logging_exporter_names(user_api_key_dict: UserAPIKeyAuth) -> se
     return names
 
 
-def _access_matches(access: Any, team_id: Optional[str], org_id: Optional[str]) -> bool:
-    """Whether an admin-owned destination's ``access`` grants this caller.
-
-    ``global`` reaches everyone; otherwise the caller's team or org must be listed.
-    Per-key access is intentionally absent: a key's token rotates on regenerate, so
-    per-key assignment lives on the key's own ``logging_exporters`` instead.
-    """
-    if not isinstance(access, dict):
-        return False
-    if access.get("global") is True:
-        return True
-    teams = access.get("teams")
-    if team_id is not None and isinstance(teams, (list, tuple)) and team_id in teams:
-        return True
-    orgs = access.get("orgs")
-    return org_id is not None and isinstance(orgs, (list, tuple)) and org_id in orgs
-
-
 async def _resolve_logging_exporters(
     user_api_key_dict: UserAPIKeyAuth,
 ) -> "tuple[list, list]":
     """Resolve the destinations this request fans out to, as (destinations, backends).
 
-    The selected set is the union of the identity chain's assigned exporter names
-    (key + team + org ``logging_exporters``) and every admin-owned logging destination
-    whose ``credential_info.access`` matches the caller (global, or the caller's team
-    or org). Each survivor is built via ``build_destination`` and deduped on (endpoint,
-    headers). The request never names or supplies a destination. Returns ([], []) only
-    when nothing is selected (default-deny).
+    ``credential_info.access`` is visibility, not enablement: a granted destination
+    does NOT fire just because the caller can see it. A destination is selected only
+    when it is an explicit global/default (``auto_enable``) OR it is named in the
+    identity chain's ``logging_exporters`` (key + team + org) AND its ``access`` grants
+    the caller. The visibility re-check is defensive: a name that points at a
+    destination no longer visible to this identity is ignored, so a stale or
+    cross-tenant assignment can never route traffic out. Each survivor is built via
+    ``build_destination`` and deduped on (endpoint, headers, resource attributes).
+    Returns ([], []) when nothing is selected (default-deny).
     """
     from litellm.integrations.otel.presets.destinations import build_destination
+    from litellm.proxy.management_endpoints.logging_exporter_access import (
+        access_grants,
+        is_auto_enable,
+    )
 
-    names = await _union_logging_exporter_names(user_api_key_dict)
-    team_id, org_id = user_api_key_dict.team_id, user_api_key_dict.org_id
+    team_id = user_api_key_dict.team_id
+    org_id = await _effective_org_id(user_api_key_dict)
+    names = await _union_logging_exporter_names(user_api_key_dict, org_id)
 
     def _selected(credential: "CredentialItem") -> bool:
         info = credential.credential_info or {}
         if info.get("credential_type") != "logging":
             return False
-        if credential.credential_name in names:
+        if is_auto_enable(info):
             return True
-        return _access_matches(info.get("access"), team_id, org_id)
+        if credential.credential_name not in names:
+            return False
+        return access_grants(info.get("access"), team_id, org_id)
 
     def _build(
         credential: "CredentialItem",
@@ -748,8 +771,13 @@ async def _apply_admin_logging_exporters(
         proxy_metadata = {}
     proxy_metadata["otel_destinations"] = destinations
     data["litellm_metadata"] = proxy_metadata
-    existing = data.get("success_callback") or []
-    data["success_callback"] = list(dict.fromkeys([*existing, *backends]))
+    # Register on both success and failure: an admin-owned destination must
+    # capture a failed upstream call (its error gen-AI span) as well as a
+    # successful one, otherwise a 401/timeout lands a trace with no LLM-call span.
+    existing_success = data.get("success_callback") or []
+    data["success_callback"] = list(dict.fromkeys([*existing_success, *backends]))
+    existing_failure = data.get("failure_callback") or []
+    data["failure_callback"] = list(dict.fromkeys([*existing_failure, *backends]))
 
 
 def _get_dynamic_logging_metadata(

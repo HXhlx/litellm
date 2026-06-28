@@ -1,12 +1,24 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import LoggingExportersSelect from "./LoggingExportersSelect";
 
 const mockUseCredentials = vi.fn();
+const mockUseAuthorized = vi.fn();
+const mockUseTeams = vi.fn();
+const mockUseOrganizations = vi.fn();
 
 vi.mock("@/app/(dashboard)/hooks/credentials/useCredentials", () => ({
   useCredentials: () => mockUseCredentials(),
+}));
+vi.mock("@/app/(dashboard)/hooks/useAuthorized", () => ({
+  default: () => mockUseAuthorized(),
+}));
+vi.mock("@/app/(dashboard)/hooks/teams/useTeams", () => ({
+  useTeams: () => mockUseTeams(),
+}));
+vi.mock("@/app/(dashboard)/hooks/organizations/useOrganizations", () => ({
+  useOrganizations: () => mockUseOrganizations(),
 }));
 
 vi.mock("antd", async () => {
@@ -33,6 +45,13 @@ vi.mock("antd", async () => {
     );
   }
   return { Select };
+});
+
+beforeEach(() => {
+  // Default: a proxy admin (formatted role "Admin"), no team/org membership needed.
+  mockUseAuthorized.mockReturnValue({ userRole: "Admin" });
+  mockUseTeams.mockReturnValue({ data: [] });
+  mockUseOrganizations.mockReturnValue({ data: [] });
 });
 
 describe("LoggingExportersSelect", () => {
@@ -80,19 +99,48 @@ describe("LoggingExportersSelect", () => {
     expect(screen.getByTestId("empty").textContent).toMatch(/proxy admin/i);
   });
 
-  it("works for a team-admin caller: backend already filters to logging-typed; component renders whatever it gets", () => {
-    // Simulates what /credentials returns to a team-admin via the backend
-    // route widening: provider credentials are dropped server-side; only
-    // logging-typed entries reach the component.
+  it("scopes a non-admin caller to destinations granted to their team/org (plus global/auto_enable)", () => {
+    // An internal_user who is a member of team-a. They must see only what they could
+    // actually assign: the team-a destination, the global one, and the auto_enable
+    // default -- never the team-b destination or the foreign-org one. This mirrors the
+    // backend assignment gate; the backend stays the authoritative check.
+    mockUseAuthorized.mockReturnValue({ userRole: "Internal User" });
+    mockUseTeams.mockReturnValue({ data: [{ team_id: "team-a" }] });
+    mockUseOrganizations.mockReturnValue({ data: [{ organization_id: "org-a" }] });
     mockUseCredentials.mockReturnValue({
       data: {
-        credentials: [{ credential_name: "poc-langfuse", credential_info: { credential_type: "logging" } }],
+        credentials: [
+          { credential_name: "mine-team", credential_info: { credential_type: "logging", access: { teams: ["team-a"] } } },
+          { credential_name: "foreign-team", credential_info: { credential_type: "logging", access: { teams: ["team-b"] } } },
+          { credential_name: "mine-org", credential_info: { credential_type: "logging", access: { orgs: ["org-a"] } } },
+          { credential_name: "foreign-org", credential_info: { credential_type: "logging", access: { orgs: ["org-z"] } } },
+          { credential_name: "everyone", credential_info: { credential_type: "logging", access: { global: true } } },
+          { credential_name: "always-on", credential_info: { credential_type: "logging", auto_enable: true } },
+        ],
       },
     });
 
-    render(<LoggingExportersSelect value={["poc-langfuse"]} onChange={() => {}} />);
+    render(<LoggingExportersSelect value={[]} onChange={() => {}} />);
 
-    expect(screen.getByTestId("option").textContent).toBe("poc-langfuse");
-    expect(screen.getByTestId("value").textContent).toBe(JSON.stringify(["poc-langfuse"]));
+    const options = screen.getAllByTestId("option").map((el) => el.textContent);
+    expect(options).toEqual(["mine-team", "mine-org", "everyone", "always-on"]);
+  });
+
+  it("shows every logging destination to a proxy admin regardless of access scope", () => {
+    mockUseAuthorized.mockReturnValue({ userRole: "Admin" });
+    mockUseTeams.mockReturnValue({ data: [] });
+    mockUseCredentials.mockReturnValue({
+      data: {
+        credentials: [
+          { credential_name: "team-b-only", credential_info: { credential_type: "logging", access: { teams: ["team-b"] } } },
+          { credential_name: "no-access", credential_info: { credential_type: "logging" } },
+        ],
+      },
+    });
+
+    render(<LoggingExportersSelect value={[]} onChange={() => {}} />);
+
+    const options = screen.getAllByTestId("option").map((el) => el.textContent);
+    expect(options).toEqual(["team-b-only", "no-access"]);
   });
 });

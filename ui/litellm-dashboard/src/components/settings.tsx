@@ -270,6 +270,8 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
   const [editAccessFor, setEditAccessFor] = useState<{ name: string; access?: CredentialAccess } | null>(null);
   // access for the destination branch of the unified Add modal
   const [addAccess, setAddAccess] = useState<CredentialAccess>({});
+  // explicit global/default (auto_enable) opt-in for the destination branch
+  const [addAutoEnable, setAddAutoEnable] = useState(false);
   const addingDestination = selectedCallback != null && LOGGING_BACKEND_IDS.has(selectedCallback);
   const addingDestinationFields = LOGGING_DESTINATION_BACKENDS.find((b) => b.id === selectedCallback)?.fields ?? [];
 
@@ -479,12 +481,14 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
           values,
           host,
           access: hasAccess ? addAccess : undefined,
+          autoEnable: addAutoEnable,
         });
         NotificationsManager.success("Logging destination created");
         refetchCredentials();
         setShowAddCallbacksModal(false);
         setSelectedCallback(null);
         setAddAccess({});
+        setAddAutoEnable(false);
         addForm.resetFields();
       } catch (error) {
         NotificationsManager.fromBackend(parseErrorMessage(error));
@@ -830,6 +834,7 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
           setSelectedCallback(null);
           setSelectedCallbackParams([]);
           setAddAccess({});
+          setAddAutoEnable(false);
         }}
         footer={null}
       >
@@ -877,10 +882,20 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
                     f.optional ? undefined : [{ required: true, message: `Please enter the ${f.label.toLowerCase()}` }]
                   }
                 >
-                  {f.type === "password" ? <Input.Password size="large" /> : <Input size="large" />}
+                  {f.type === "password" ? (
+                    <Input.Password size="large" placeholder={f.placeholder} />
+                  ) : (
+                    <Input size="large" placeholder={f.placeholder} />
+                  )}
                 </FormItem>
               ))}
               <AccessControlFields value={addAccess} onChange={setAddAccess} />
+              <Form.Item
+                label="Auto-enable for all requests"
+                tooltip="When on, every request exports its traces to this destination automatically, without being named on a key, team, or org. The explicit global default; replaces relying on Global to auto-enable."
+              >
+                <Switch checked={addAutoEnable} onChange={setAddAutoEnable} />
+              </Form.Item>
             </div>
           ) : (
             <DynamicParamsFields
@@ -897,6 +912,7 @@ const Settings: React.FC<SettingsPageProps> = ({ accessToken, userRole, userID, 
                 setSelectedCallback(null);
                 setSelectedCallbackParams([]);
                 setAddAccess({});
+                setAddAutoEnable(false);
                 addForm.resetFields();
               }}
               disabled={isAddingCallback}

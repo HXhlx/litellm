@@ -79,18 +79,19 @@ _OPEN_CALLS_MAX = 10_000
 class _LLMCallSpan:
     """The state carried from the ``pre_call`` boundary to span close.
 
-    ``span`` is the live span when it could be opened at the boundary (the server
-    span was ambient), or ``None`` when creation was deferred because no ambient
-    parent was visible — in which case the async callback creates it against its
-    own (worker-copied) ambient context using ``start_time_ns``. The presence of
-    a carrier for a call at all is the proof that ``pre_call`` ran, i.e. that an
-    upstream call was actually attempted.
+    ``spans`` is one live span per destination Resource group (a backend like Arize
+    routing two projects yields two), opened at the boundary when the server span was
+    ambient. It is empty when creation was deferred because no ambient parent was visible
+    — in which case the async callback creates the span(s) against its own
+    (worker-copied) ambient context using ``start_time_ns``. The presence of a carrier
+    for a call at all is the proof that ``pre_call`` ran, i.e. that an upstream call was
+    actually attempted.
     """
 
-    __slots__ = ("span", "start_time_ns")
+    __slots__ = ("spans", "start_time_ns")
 
-    def __init__(self, span: "Span | None", start_time_ns: int | None) -> None:
-        self.span = span
+    def __init__(self, spans: "tuple[Span, ...]", start_time_ns: int | None) -> None:
+        self.spans = spans
         self.start_time_ns = start_time_ns
 
 
@@ -112,7 +113,11 @@ class OpenTelemetryV2(CustomLogger):
         self._tracer_provider: TracerProvider = (
             tracer_provider
             if tracer_provider is not None
-            else build_tracer_provider(self.config, tenant_fan_out_owner=callback_name)
+            else build_tracer_provider(
+                self.config,
+                tenant_fan_out_owner=callback_name,
+                attach_tenant_fan_out=True,
+            )
         )
         self.tracer: Tracer = get_tracer(self._tracer_provider, LITELLM_TRACER_NAME)
         self._metrics_recorder = self._init_metrics(meter_provider)
@@ -219,24 +224,30 @@ class OpenTelemetryV2(CustomLogger):
         if call_id in self._open_llm_calls:
             return
         start_time_ns = to_ns(datetime.now())
-        span: Span | None = None
+        # One live span per destination Resource group (Arize routing two projects
+        # yields two; header-routed backends yield one). Empty until a recordable
+        # parent is confirmed.
+        spans: tuple[Span, ...] = ()
         # Parent to the request's anchored root span (stable across the request),
         # falling back to ambient on the SDK path. Open the span live only when
         # that resolves to a recordable parent; otherwise defer to the close
         # callback (the thread-pool case, where the anchor isn't visible here).
         parent_context = resolve_request_span_context()
         if is_recordable_span(get_current_span(parent_context)):
-            span = self._emitter.start_span(
-                SpanRole.LLM_CALL,
-                call.provisional_span_name,
-                parent_context=parent_context,
-                start_time_ns=start_time_ns,
-                tracer=self._tenant_tracers.tracer_for(
+            spans = tuple(
+                self._emitter.start_span(
+                    SpanRole.LLM_CALL,
+                    call.provisional_span_name,
+                    parent_context=parent_context,
+                    start_time_ns=start_time_ns,
+                    tracer=tracer,
+                )
+                for tracer in self._tenant_tracers.tracers_for(
                     self.tracer, self._destinations_for_backend(call)
-                ),
+                )
             )
         self._open_llm_calls[call_id] = _LLMCallSpan(
-            span=span, start_time_ns=start_time_ns
+            spans=spans, start_time_ns=start_time_ns
         )
         # Evict the oldest open call if the map is over budget. A call that opens
         # but never closes (a stream that only fires stream events) would linger
@@ -355,18 +366,19 @@ class OpenTelemetryV2(CustomLogger):
         end_time_ns = to_ns(end_time)
         self._mark_closed(call_id)
         if payload is None:
-            if carrier.span is not None:
-                carrier.span.end(end_time=end_time_ns)
+            for span in carrier.spans:
+                span.end(end_time=end_time_ns)
             return None
 
         data = LLMCallSpanData.from_standard_logging_payload(
             payload, capture_content=self.config.capture_span_content
         )
-        if carrier.span is not None:
-            self._emitter.finish_span(
-                SpanRole.LLM_CALL, carrier.span, data, end_time_ns=end_time_ns
-            )
-            return carrier.span
+        if carrier.spans:
+            for span in carrier.spans:
+                self._emitter.finish_span(
+                    SpanRole.LLM_CALL, span, data, end_time_ns=end_time_ns
+                )
+            return carrier.spans[0]
         return self._emit_deferred_llm_call(
             payload,
             self._destinations_for_backend(call),
@@ -413,13 +425,13 @@ class OpenTelemetryV2(CustomLogger):
             team_metadata_keys=tuple(self.config.baggage_team_metadata_keys),
         )
         parent_ctx = set_request_baggage(bag, context=base_ctx) if bag else base_ctx
-        return self._emitter.emit(
+        return self._emitter.emit_fanout(
             SpanRole.LLM_CALL,
             data,
             parent_context=parent_ctx,
             start_time_ns=start_time_ns,
             end_time_ns=end_time_ns,
-            tracer=self._tenant_tracers.tracer_for(self.tracer, destinations),
+            tracers=self._tenant_tracers.tracers_for(self.tracer, destinations),
         )
 
     # ====================================================================== #

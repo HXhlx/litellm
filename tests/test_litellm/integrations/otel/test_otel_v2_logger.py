@@ -478,7 +478,7 @@ def test_live_llm_span_anchors_to_root_with_no_active_span():
     set_request_root_span(server)
     kwargs = _kwargs()
     logger.log_pre_api_call(model="gpt-4o", messages=[], kwargs=kwargs)
-    assert logger._open_llm_calls["call_1"].span is not None  # live, via anchor
+    assert logger._open_llm_calls["call_1"].spans  # live, via anchor
     asyncio.run(logger.async_log_success_event(kwargs, None, None, None))
     server.end()
     by_name = {s.name: s for s in exporter.get_finished_spans()}
@@ -498,7 +498,7 @@ def test_deferred_llm_span_reads_anchor_at_close():
     kwargs = _kwargs()
     # pre_call with NO anchor and no active span → deferred.
     logger.log_pre_api_call(model="gpt-4o", messages=[], kwargs=kwargs)
-    assert logger._open_llm_calls["call_1"].span is None  # deferred
+    assert logger._open_llm_calls["call_1"].spans == ()  # deferred
     # Anchor becomes visible at close (worker copied the request task's context).
     set_request_root_span(server)
     asyncio.run(logger.async_log_success_event(kwargs, None, None, None))
@@ -552,18 +552,18 @@ def test_lazy_activation_emits_llm_span_when_destination_resolves(monkeypatch):
         SpanRole.PROXY_REQUEST, LITELLM_PROXY_REQUEST_SPAN_NAME
     )
     set_request_root_span(server)
-    # Make ``tracer_for`` return the logger's default tracer regardless of the
+    # Make ``tracers_for`` return the logger's default tracer regardless of the
     # destinations passed: the test asserts the close-path emitted the span, not
     # that the per-destination provider clone wired up an OTLP exporter (the
     # routing cache's job, covered separately). The default tracer is bound to
     # the in-memory exporter so the test can read the result.
     tracer_for_calls: list[tuple] = []
 
-    def _fake_tracer_for(default, destinations):
+    def _fake_tracers_for(default, destinations):
         tracer_for_calls.append(destinations)
-        return default
+        return (default,)
 
-    monkeypatch.setattr(logger._tenant_tracers, "tracer_for", _fake_tracer_for)
+    monkeypatch.setattr(logger._tenant_tracers, "tracers_for", _fake_tracers_for)
     kwargs = _kwargs()
     kwargs["standard_callback_dynamic_params"] = {
         "otel_destinations": [
@@ -579,7 +579,7 @@ def test_lazy_activation_emits_llm_span_when_destination_resolves(monkeypatch):
     server.end()
     names = [s.name for s in exporter.get_finished_spans()]
     assert "chat gpt-4o" in names
-    # ``tracer_for`` was invoked with exactly the resolved destination, proving
+    # ``tracers_for`` was invoked with exactly the resolved destination, proving
     # the deferred path used per-tenant routing rather than the default tracer
     # blindly.
     assert len(tracer_for_calls) == 1
@@ -591,7 +591,9 @@ def test_second_close_after_opened_call_does_not_emit_duplicate(monkeypatch):
     logger, exporter = _logger()
     monkeypatch.setattr(logger, "callback_name", "in_memory")
     monkeypatch.setattr(
-        logger._tenant_tracers, "tracer_for", lambda default, destinations: default
+        logger._tenant_tracers,
+        "tracers_for",
+        lambda default, destinations: (default,),
     )
     server = logger._emitter.start_span(
         SpanRole.PROXY_REQUEST, LITELLM_PROXY_REQUEST_SPAN_NAME
@@ -670,7 +672,7 @@ def test_close_dedupes_duplicate_callbacks(monkeypatch):
     )
     set_request_root_span(server)
     monkeypatch.setattr(
-        logger._tenant_tracers, "tracer_for", lambda default, dests: default
+        logger._tenant_tracers, "tracers_for", lambda default, dests: (default,)
     )
     kwargs = _kwargs()
     kwargs["standard_callback_dynamic_params"] = {
@@ -1735,3 +1737,139 @@ def test_metrics_disabled_by_default_records_nothing(monkeypatch):
         )
     )
     assert _emitted_metric_names(reader) == set()
+
+
+def _second_group_tracer(logger):
+    """A second independent in-memory provider standing in for a second Resource group
+    (e.g. a second Arize project); returns (tracer, exporter)."""
+    exporter = InMemorySpanExporter()
+    provider = providers.build_tracer_provider(logger.config, exporter=exporter)
+    return provider.get_tracer("litellm"), exporter
+
+
+def test_genai_span_emitted_to_every_group_live(monkeypatch):
+    """Multi-destination fix (live path): when ``tracers_for`` returns two tracers (two
+    Resource groups, e.g. two Arize projects), the gen-AI span opened at ``pre_call``
+    must be opened+finished on BOTH -- the bug was only one project receiving it."""
+    logger, exporter_a = _logger()
+    monkeypatch.setattr(logger, "callback_name", "in_memory")
+    tracer_b, exporter_b = _second_group_tracer(logger)
+    monkeypatch.setattr(
+        logger._tenant_tracers,
+        "tracers_for",
+        lambda default, dests: (default, tracer_b),
+    )
+    server = logger._emitter.start_span(
+        SpanRole.PROXY_REQUEST, LITELLM_PROXY_REQUEST_SPAN_NAME
+    )
+    set_request_root_span(server)
+    kwargs = _kwargs()
+    kwargs["standard_callback_dynamic_params"] = {
+        "otel_destinations": [
+            {"callback_name": "in_memory", "endpoint": "https://x/v1", "headers": {}}
+        ]
+    }
+    _emit_llm(logger, kwargs, ambient=server)
+    server.end()
+    assert [s.name for s in exporter_a.get_finished_spans()].count("chat gpt-4o") == 1
+    assert [s.name for s in exporter_b.get_finished_spans()].count("chat gpt-4o") == 1
+
+
+def test_genai_span_emitted_to_every_group_deferred(monkeypatch):
+    """Same fix, deferred path (no carrier at ``pre_call``): ``emit_fanout`` dedups once
+    on the call id then emits the span on every group's tracer, so both projects get
+    exactly one."""
+    logger, exporter_a = _logger()
+    monkeypatch.setattr(logger, "callback_name", "in_memory")
+    tracer_b, exporter_b = _second_group_tracer(logger)
+    monkeypatch.setattr(
+        logger._tenant_tracers,
+        "tracers_for",
+        lambda default, dests: (default, tracer_b),
+    )
+    server = logger._emitter.start_span(
+        SpanRole.PROXY_REQUEST, LITELLM_PROXY_REQUEST_SPAN_NAME
+    )
+    set_request_root_span(server)
+    kwargs = _kwargs()
+    kwargs["standard_callback_dynamic_params"] = {
+        "otel_destinations": [
+            {"callback_name": "in_memory", "endpoint": "https://x/v1", "headers": {}}
+        ]
+    }
+    # no pre_call -> no carrier -> deferred close path
+    assert "call_1" not in logger._open_llm_calls
+    asyncio.run(logger.async_log_success_event(kwargs, None, None, None))
+    server.end()
+    assert [s.name for s in exporter_a.get_finished_spans()].count("chat gpt-4o") == 1
+    assert [s.name for s in exporter_b.get_finished_spans()].count("chat gpt-4o") == 1
+
+
+def _generic_dest():
+    return {
+        "callback_name": "generic",
+        "endpoint": "http://collector:4318",
+        "headers": {},
+    }
+
+
+def test_generic_destination_emits_genai_span(monkeypatch):
+    """Acceptance #1: a request whose only admin destination is a Generic OTLP
+    destination emits the chat <model> gen-AI span (regression: 'generic' had no preset,
+    so the gen-AI span was dropped and only proxy-internal spans reached the endpoint).
+    The destination's callback_name='generic' is matched by the generic logger, and the
+    span is routed through the per-destination tracer."""
+    logger, exporter = _logger()
+    monkeypatch.setattr(logger, "callback_name", "generic")
+    routed: list = []
+    monkeypatch.setattr(
+        logger._tenant_tracers,
+        "tracers_for",
+        lambda default, dests: (routed.append(dests) or (default,)),
+    )
+    server = logger._emitter.start_span(
+        SpanRole.PROXY_REQUEST, LITELLM_PROXY_REQUEST_SPAN_NAME
+    )
+    set_request_root_span(server)
+    kwargs = _kwargs()
+    kwargs["standard_callback_dynamic_params"] = {
+        "otel_destinations": [_generic_dest()]
+    }
+    _emit_llm(logger, kwargs, ambient=server)
+    server.end()
+    assert "chat gpt-4o" in [s.name for s in exporter.get_finished_spans()]
+    # the gen-AI span was routed for the generic destination (not an empty/global set)
+    assert any(
+        len(d) == 1 and d[0].endpoint == "http://collector:4318" for d in routed
+    ), "generic destination was not routed to the generic logger's tracer"
+
+
+def test_generic_destination_emits_error_span_on_failure(monkeypatch):
+    """Acceptance #3: a FAILED call to a Generic OTLP destination still emits the
+    chat <model> span, with OTEL status ERROR and the exception type."""
+    logger, exporter = _logger()
+    monkeypatch.setattr(logger, "callback_name", "generic")
+    monkeypatch.setattr(
+        logger._tenant_tracers, "tracers_for", lambda default, dests: (default,)
+    )
+    server = logger._emitter.start_span(
+        SpanRole.PROXY_REQUEST, LITELLM_PROXY_REQUEST_SPAN_NAME
+    )
+    set_request_root_span(server)
+    payload = _payload(
+        status="failure",
+        error_information={
+            "error_class": "AuthenticationError",
+            "error_message": "Incorrect API key",
+        },
+    )
+    kwargs = _kwargs(payload=payload)
+    kwargs["standard_callback_dynamic_params"] = {
+        "otel_destinations": [_generic_dest()]
+    }
+    _emit_llm(logger, kwargs, ambient=server, fail=True)
+    server.end()
+    spans = {s.name: s for s in exporter.get_finished_spans()}
+    assert "chat gpt-4o" in spans
+    assert spans["chat gpt-4o"].status.status_code is StatusCode.ERROR
+    assert spans["chat gpt-4o"].attributes["error.type"] == "AuthenticationError"

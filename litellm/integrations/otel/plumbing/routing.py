@@ -3,12 +3,16 @@
 A call's identity chain is assigned a set of admin-owned OTEL destinations
 (``LLMCallEvent.otel_destinations``, resolved server-side from named credentials).
 Its spans must export to ALL of them plus the configured/global exporter, so
-``TenantTracerCache`` builds and caches one ``TracerProvider`` per distinct
-destination SET -- the provider keeps the configured exporters and appends one
-``SpanProcessor`` per destination, so a span is emitted once and copied to each
-(no duplicate spans). With no destinations it hands back the logger's default
-tracer (global only). Destinations are never request-derived, so a caller can
-neither redirect a trace nor spawn providers.
+``TenantTracerCache`` builds and caches ``TracerProvider``s that append one
+``SpanProcessor`` per destination. The gen-AI span path (``tracers_for``) groups
+destinations by their backend-required Resource attributes and builds one provider
+per group, because a span carries exactly one Resource (a provider property) and a
+backend like Arize selects its project FROM the Resource -- so two Arize projects
+each get a correctly-tagged span instead of one last-wins merge. Header-routed
+backends declare no Resource attributes, so their destinations stay in one group with
+multiple exporters and route by per-exporter auth. With no destinations it hands back
+the logger's default tracer (global only). Destinations are never request-derived, so
+a caller can neither redirect a trace nor spawn providers.
 """
 
 from collections import OrderedDict
@@ -61,21 +65,95 @@ class TenantTracerCache:
         self._config = config
         self._callback_name = callback_name
         self._tracer_name = tracer_name
-        self._providers: OrderedDict[
-            tuple[tuple[str, tuple[tuple[str, str], ...]], ...], TracerProvider
-        ] = OrderedDict()
+        self._providers: OrderedDict[tuple[object, ...], TracerProvider] = OrderedDict()
+
+    def tracers_for(
+        self, default: Tracer, destinations: "tuple[OtelDestination, ...]"
+    ) -> "tuple[Tracer, ...]":
+        """The tracers for this request's gen-AI span, one per distinct Resource group.
+
+        A span carries exactly one Resource (it's a property of the ``TracerProvider``),
+        but a backend like Arize selects its project FROM the Resource
+        (``arize.project.name`` / ``model_id``), so two Arize destinations with different
+        projects need two differently-tagged spans. Group the backend's resolved
+        destinations by ``destination_resource_attrs`` and return one tracer per group;
+        the caller emits the span once per tracer (mirroring how the fan-out processor
+        re-wraps proxy-internal spans per destination).
+
+        Header-routed backends (langfuse, weave) declare no Resource attributes, so all
+        their destinations collapse into one empty-Resource group with one exporter each
+        and keep routing by per-exporter auth -- unchanged from the single-group path.
+        The configured/global exporters ride the FIRST group only, so the global receives
+        the span once. Empty ``destinations`` -> the logger's default tracer (deny).
+        """
+        if not destinations:
+            return (default,)
+        return tuple(
+            self._tracer_for_group(resource_key, group, include_base=index == 0)
+            for index, (resource_key, group) in enumerate(
+                self._group_by_resource(destinations)
+            )
+        )
+
+    def _group_by_resource(
+        self, destinations: "tuple[OtelDestination, ...]"
+    ) -> "list[tuple[tuple[tuple[str, str], ...], list[OtelDestination]]]":
+        """Destinations grouped by their backend-required Resource attributes.
+
+        The key is a stable sorted tuple of ``destination_resource_attrs`` items.
+        Groups are returned in a deterministic order (sorted by key), so the
+        empty-Resource group (header-routed backends) sorts first and the
+        configured/global exporters attach to it.
+        """
+        from litellm.integrations.otel.plumbing.providers import (
+            destination_resource_attrs,
+        )
+
+        groups: OrderedDict[tuple[tuple[str, str], ...], list[OtelDestination]] = (
+            OrderedDict()
+        )
+        for destination in destinations:
+            key = tuple(sorted(destination_resource_attrs(destination).items()))
+            groups.setdefault(key, []).append(destination)
+        return sorted(groups.items())
+
+    def _tracer_for_group(
+        self,
+        resource_key: "tuple[tuple[str, str], ...]",
+        group: "list[OtelDestination]",
+        *,
+        include_base: bool,
+    ) -> Tracer:
+        cache_key: tuple[object, ...] = (
+            resource_key,
+            tuple(
+                sorted((d.endpoint, tuple(sorted(d.headers.items()))) for d in group)
+            ),
+            include_base,
+        )
+        provider = self._providers.get(cache_key)
+        if provider is not None:
+            self._providers.move_to_end(cache_key)
+        else:
+            provider = build_tracer_provider(
+                self._config_with_destinations(
+                    tuple(group), include_base_exporters=include_base
+                )
+            )
+            self._providers[cache_key] = provider
+            if len(self._providers) > _MAX_CACHED_PROVIDERS:
+                _, evicted = self._providers.popitem(last=False)
+                _shutdown_provider(evicted)
+        return get_tracer(provider, self._tracer_name)
 
     def tracer_for(
         self, default: Tracer, destinations: "tuple[OtelDestination, ...]"
     ) -> Tracer:
-        """Return the tracer for this request.
+        """Single merged tracer for ``destinations`` (one provider, one Resource).
 
-        ``destinations`` are the admin-resolved exporters (for this backend) that the
-        request's identity chain is assigned. Empty -> the logger's default tracer
-        (the global/configured exporter only = deny). Otherwise build (or reuse) a
-        provider that exports to the configured exporters PLUS every destination, so
-        one span is emitted once and copied to all (fan-out, no duplicate spans). The
-        cache is a bounded LRU keyed on the destination SET.
+        The single-group primitive: kept for the destination-set cache mechanics and as
+        the building block ``tracers_for`` composes per group. The gen-AI span path uses
+        ``tracers_for`` so multiple Resource groups aren't last-wins merged.
         """
         if not destinations:
             return default
@@ -117,21 +195,29 @@ class TenantTracerCache:
         return default_otlp_kind_for_backend(self._callback_name)
 
     def _config_with_destinations(
-        self, destinations: "tuple[OtelDestination, ...]"
+        self,
+        destinations: "tuple[OtelDestination, ...]",
+        *,
+        include_base_exporters: bool = True,
     ) -> OpenTelemetryV2Config:
-        """Clone the config, KEEPING its exporters (so the global/default still
-        receives) and APPENDING one exporter per resolved destination. The shared
-        ``TracerProvider`` attaches one ``SpanProcessor`` per spec, so a single span
-        is emitted once and exported to the global destination plus every assigned
-        one. Each appended exporter's endpoint is the resolved host (the cross-host
-        fix) with its own auth headers (per-destination isolation).
+        """Clone the config and APPEND one exporter per resolved destination. The shared
+        ``TracerProvider`` attaches one ``SpanProcessor`` per spec, so a single span is
+        emitted once and exported to every appended destination. Each appended exporter's
+        endpoint is the resolved host (the cross-host fix) with its own auth headers
+        (per-destination isolation).
 
-        The clone's Resource also folds in the destinations' backend-required
-        Resource attributes (Arize needs ``model_id`` / ``arize.project.name``), via
-        the same ``destination_resource_attrs`` the fan-out path uses on proxy-
-        internal spans. Without this the gen-AI span emitted through the clone
-        reaches Arize with only ``service.name`` while its parents (fan-out) carry
-        ``model_id``, and Arize splits the trace into an orphaned subtree."""
+        ``include_base_exporters`` keeps the configured/global exporters too (so the
+        global still receives). ``tracers_for`` sets it only on the first Resource group,
+        so when a backend splits into multiple groups the global gets the span once
+        rather than once per group.
+
+        The clone's Resource folds in the destinations' backend-required Resource
+        attributes (Arize needs ``model_id`` / ``arize.project.name``), via the same
+        ``destination_resource_attrs`` the fan-out path uses on proxy-internal spans.
+        Callers group destinations by those attributes first, so within one call all
+        ``destinations`` share a Resource and the merge is not lossy -- without this the
+        gen-AI span would reach Arize with only ``service.name`` while its parents
+        (fan-out) carry ``model_id``, orphaning the subtree."""
         from litellm.integrations.otel.plumbing.providers import (
             destination_resource_attrs,
         )
@@ -146,6 +232,7 @@ class TenantTracerCache:
             )
             for d in destinations
         ]
+        base_exporters = [*self._config.exporters] if include_base_exporters else []
         merged_resource_attrs = {
             **self._config.resource_attributes,
             **{
@@ -156,7 +243,7 @@ class TenantTracerCache:
         }
         return self._config.model_copy(
             update={
-                "exporters": [*self._config.exporters, *appended],
+                "exporters": [*base_exporters, *appended],
                 "resource_attributes": merged_resource_attrs,
             }
         )

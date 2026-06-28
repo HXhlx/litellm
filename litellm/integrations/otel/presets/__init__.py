@@ -17,6 +17,7 @@ host off a request.
 from litellm.integrations.otel.presets.agentops import agentops_preset
 from litellm.integrations.otel.presets.arize import arize_preset
 from litellm.integrations.otel.presets.base import Preset
+from litellm.integrations.otel.presets.generic import generic_preset
 from litellm.integrations.otel.presets.langfuse import langfuse_preset
 from litellm.integrations.otel.presets.langtrace import langtrace_preset
 from litellm.integrations.otel.presets.levo import levo_preset
@@ -29,6 +30,7 @@ PRESET_BY_CALLBACK: dict[str, Preset] = {
     "agentops": agentops_preset,
     "arize": arize_preset,
     "arize_phoenix": phoenix_preset,
+    "generic": generic_preset,
     "langfuse_otel": langfuse_preset,
     "langtrace": langtrace_preset,
     "levo": levo_preset,
@@ -41,6 +43,7 @@ __all__ = [
     "Preset",
     "agentops_preset",
     "arize_preset",
+    "generic_preset",
     "langfuse_preset",
     "langtrace_preset",
     "levo_preset",
