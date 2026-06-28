@@ -13220,6 +13220,87 @@ async def test_update_key_non_admin_permissions_rejected(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "update_fields,error_fragment",
+    [
+        ({"max_budget": 1_000_000.0}, "max_budget"),
+        (
+            {"budget_limits": [{"budget_duration": "1d", "max_budget": 1_000_000.0}]},
+            "budget_limits",
+        ),
+        (
+            {"budget_limits": [{"budget_duration": "1d", "max_budget": float("nan")}]},
+            "finite number",
+        ),
+    ],
+)
+async def test_update_key_admin_caller_cannot_exceed_own_ceiling(
+    monkeypatch, update_fields, error_fragment
+):
+    """
+    A team admin / org admin passes the admin gate inside
+    _check_key_update_authorization, then must still respect the same
+    delegation ceiling that /key/generate, /key/regenerate, and the bulk
+    paths enforce. Without this, a team admin with max_budget=$100 could
+    rewrite a key's max_budget or per-window budget_limits to $1M, or
+    write a NaN that silently disables downstream budget enforcement.
+    """
+    from litellm.proxy._types import LiteLLM_VerificationToken
+    from litellm.proxy.management_endpoints.key_management_endpoints import (
+        _validate_update_key_data,
+    )
+
+    monkeypatch.setattr(
+        "litellm.proxy.management_endpoints.key_management_endpoints.litellm.default_key_generate_params",
+        None,
+        raising=False,
+    )
+    team_admin = UserAPIKeyAuth(
+        user_role=LitellmUserRoles.INTERNAL_USER,
+        user_id="team-admin",
+        max_budget=100.0,
+    )
+    existing_key = LiteLLM_VerificationToken(
+        token="hashed-team-key",
+        user_id="team-admin",
+        created_by="team-admin",
+        team_id="team-x",
+        max_budget=100.0,
+        spend=0.0,
+    )
+    data = UpdateKeyRequest(key="sk-team-key", **update_fields)
+    # The cross-key admin gate inside _check_key_update_authorization is
+    # exercised by sibling tests; patch it to no-op here so this test
+    # isolates the delegation-ceiling check on a caller who legitimately
+    # passes the admin gate.
+    with patch(
+        "litellm.proxy.management_endpoints.key_management_endpoints._check_key_admin_access",
+        new_callable=AsyncMock,
+    ):
+        with patch(
+            "litellm.proxy.management_endpoints.key_management_endpoints.TeamMemberPermissionChecks.can_team_member_execute_key_management_endpoint",
+            new_callable=AsyncMock,
+        ):
+            with patch(
+                "litellm.proxy.management_endpoints.key_management_endpoints.get_team_object",
+                new_callable=AsyncMock,
+                return_value=None,
+            ):
+                with pytest.raises(HTTPException) as exc_info:
+                    await _validate_update_key_data(
+                        data=data,
+                        existing_key_row=existing_key,
+                        user_api_key_dict=team_admin,
+                        llm_router=None,
+                        premium_user=False,
+                        prisma_client=MagicMock(),
+                        user_api_key_cache=None,
+                    )
+    assert exc_info.value.status_code == 400
+    assert error_fragment in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
 async def test_update_key_non_admin_explicit_clear_rejected(monkeypatch):
     """
     An explicit `permissions={}` (or null) from a non-admin owner clears

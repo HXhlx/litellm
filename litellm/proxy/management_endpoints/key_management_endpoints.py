@@ -2107,52 +2107,10 @@ async def _process_single_key_update(
                 prisma_client=prisma_client,
             )
 
-    is_ui_session_team_key = (
-        user_api_key_dict.team_id == UI_SESSION_TOKEN_TEAM_ID and update_key_request.team_id is not None
-    )
-    delegation_ceiling = (
-        user_api_key_dict.max_budget
-        if user_api_key_dict.max_budget is not None
-        else (team_obj.max_budget if user_api_key_dict.is_session_token and team_obj is not None else None)
-    )
-    if (
-        user_api_key_dict.is_session_token
-        and user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN.value
-        and not is_ui_session_team_key
-        and update_key_request.max_budget is not None
-        and team_obj is None
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": (
-                    f"max_budget ({update_key_request.max_budget}) cannot be set without "
-                    "specifying team_id when using a CLI session token."
-                )
-            },
-        )
-    if (
-        user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN.value
-        and not is_ui_session_team_key
-        and update_key_request.max_budget is not None
-        and delegation_ceiling is not None
-        and update_key_request.max_budget > delegation_ceiling
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": (
-                    f"max_budget ({update_key_request.max_budget}) cannot exceed the caller's "
-                    f"own max_budget ({delegation_ceiling})."
-                )
-            },
-        )
-    _check_budget_limits_delegation_ceiling(
-        budget_limits=update_key_request.budget_limits,
-        delegation_ceiling=delegation_ceiling,
-        user_api_key_dict=user_api_key_dict,
-        is_ui_session_team_key=is_ui_session_team_key,
+    _check_update_delegation_ceiling(
+        data=update_key_request,
         team_table=team_obj,
+        user_api_key_dict=user_api_key_dict,
     )
 
     # Validate team change if team is being changed
@@ -2258,6 +2216,69 @@ async def _validate_mcp_servers_for_key_update(
         team_obj=effective_team_obj,
     )
     return normalized_object_permission
+
+
+def _check_update_delegation_ceiling(
+    data: UpdateKeyRequest,
+    team_table: Optional[LiteLLM_TeamTableCachedObj],
+    user_api_key_dict: UserAPIKeyAuth,
+) -> None:
+    """
+    Mirror the create-side delegation ceiling on every update path.
+
+    Without this, a team admin / org admin with `max_budget=$100` could call
+    `/key/update` or `/team/key/bulk_update` with `max_budget=$1_000_000`
+    or `budget_limits=[{1d, $1_000_000}]` and pass the upstream admin
+    gate (they are admins of the key's team) with no constraint that the
+    new budget be within their own delegation authority. This helper
+    enforces the same scalar `max_budget`, session-token, and per-window
+    ceiling checks that `_common_key_generation_helper` applies on
+    `/key/generate`.
+    """
+    is_ui_session_team_key = user_api_key_dict.team_id == UI_SESSION_TOKEN_TEAM_ID and data.team_id is not None
+    delegation_ceiling = (
+        user_api_key_dict.max_budget
+        if user_api_key_dict.max_budget is not None
+        else (team_table.max_budget if user_api_key_dict.is_session_token and team_table is not None else None)
+    )
+    if (
+        user_api_key_dict.is_session_token
+        and user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN.value
+        and not is_ui_session_team_key
+        and data.max_budget is not None
+        and team_table is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"max_budget ({data.max_budget}) cannot be set without "
+                    "specifying team_id when using a CLI session token."
+                )
+            },
+        )
+    if (
+        user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN.value
+        and not is_ui_session_team_key
+        and data.max_budget is not None
+        and delegation_ceiling is not None
+        and data.max_budget > delegation_ceiling
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"max_budget ({data.max_budget}) cannot exceed the caller's own max_budget ({delegation_ceiling})."
+                )
+            },
+        )
+    _check_budget_limits_delegation_ceiling(
+        budget_limits=data.budget_limits,
+        delegation_ceiling=delegation_ceiling,
+        user_api_key_dict=user_api_key_dict,
+        is_ui_session_team_key=is_ui_session_team_key,
+        team_table=team_table,
+    )
 
 
 async def _check_key_update_authorization(
@@ -2410,49 +2431,10 @@ async def _validate_update_key_data(
                 prisma_client=prisma_client,
             )
 
-    is_ui_session_team_key = user_api_key_dict.team_id == UI_SESSION_TOKEN_TEAM_ID and data.team_id is not None
-    delegation_ceiling = (
-        user_api_key_dict.max_budget
-        if user_api_key_dict.max_budget is not None
-        else (team_obj.max_budget if user_api_key_dict.is_session_token and team_obj is not None else None)
-    )
-    if (
-        user_api_key_dict.is_session_token
-        and user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN.value
-        and not is_ui_session_team_key
-        and data.max_budget is not None
-        and team_obj is None
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": (
-                    f"max_budget ({data.max_budget}) cannot be set without "
-                    "specifying team_id when using a CLI session token."
-                )
-            },
-        )
-    if (
-        user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN.value
-        and not is_ui_session_team_key
-        and data.max_budget is not None
-        and delegation_ceiling is not None
-        and data.max_budget > delegation_ceiling
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": (
-                    f"max_budget ({data.max_budget}) cannot exceed the caller's own max_budget ({delegation_ceiling})."
-                )
-            },
-        )
-    _check_budget_limits_delegation_ceiling(
-        budget_limits=data.budget_limits,
-        delegation_ceiling=delegation_ceiling,
-        user_api_key_dict=user_api_key_dict,
-        is_ui_session_team_key=is_ui_session_team_key,
+    _check_update_delegation_ceiling(
+        data=data,
         team_table=team_obj,
+        user_api_key_dict=user_api_key_dict,
     )
 
     # Validate key against project limits if project_id is being set
