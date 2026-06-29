@@ -1837,7 +1837,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             )
 
     def update_headers_with_optional_anthropic_beta(
-        self, headers: dict, optional_params: dict, messages: Sequence[object] = ()
+        self, headers: dict, optional_params: dict, messages: Sequence[object] = (), litellm_params: Optional[dict] = None
     ) -> dict:
         """Update headers with optional anthropic beta."""
 
@@ -1849,6 +1849,10 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
 
         if requires_native_compaction_beta(self._resolved_provider, optional_params, messages):
             self._ensure_beta_header(headers, ANTHROPIC_BETA_HEADER_VALUES.COMPACT_2026_09_04.value)
+
+        _orig = optional_params.get("_original_model") or (litellm_params or {}).get("_original_model", "") or ""
+        if re.search(r"\[1m\]$", _orig):
+            self._ensure_beta_header(headers, "context-1m-2025-08-07")
 
         _tools: Final = optional_params.get("tools", [])
         for tool in _tools:
@@ -1944,6 +1948,9 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             model=model,
             optional_params=optional_params,
             custom_llm_provider=self._resolved_provider,
+        )
+        headers = self.update_headers_with_optional_anthropic_beta(
+            headers=headers, optional_params=optional_params, litellm_params=litellm_params
         )
 
         # === Tool-name sanitization (single chokepoint) ===

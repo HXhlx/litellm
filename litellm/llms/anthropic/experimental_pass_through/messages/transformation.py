@@ -1,3 +1,4 @@
+import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, Final
 
@@ -621,6 +622,7 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         - output_format: adds 'structured-outputs-2025-11-13'
         - speed: adds 'fast-mode-2026-02-01'
         - a message carrying output_config: adds 'per-turn-control-2026-07-01'
+        - [1m] suffix: adds 'context-1m-2025-08-07'
 
         Args:
             headers: Request headers dict
@@ -641,6 +643,11 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
 
         if requires_native_compaction_beta(custom_llm_provider, optional_params, messages):
             beta_values.add(ANTHROPIC_BETA_HEADER_VALUES.COMPACT_2026_09_04.value)
+
+        # Auto-add context-1m beta header when [1m] suffix is present
+        _original_model = optional_params.get("_original_model", "")
+        if re.search(r"\[1m\]$", _original_model):
+            beta_values.add("context-1m-2025-08-07")
 
         # Check for context management
         context_management_param: Final = optional_params.get("context_management")
