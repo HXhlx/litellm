@@ -150,3 +150,6 @@ litellm.log
 
 .coverage-rust
 coverage-rust.xml
+
+proxy_config.yaml.bak.*
+snapshots/
