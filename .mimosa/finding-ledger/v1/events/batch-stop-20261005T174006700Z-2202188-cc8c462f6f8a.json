@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261005T174006700Z-2202188-cc8c462f6f8a",
+  "runId": "20261005T174006700Z-2202188-cc8c462f6f8a",
+  "runStatus": "inconclusive",
+  "coverage": {
+    "status": "partial",
+    "reasons": [
+      {
+        "code": "bash_discovery_incomplete",
+        "stage": "bash-discovery",
+        "target": "litellm-proxy-extras/litellm_proxy_extras/prisma_toolchain.py",
+        "detail": "project enumeration exceeded 5000 reviewable files",
+        "affectsCompletion": true
+      },
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": "litellm-proxy-extras/litellm_proxy_extras/prisma_toolchain.py",
+        "detail": "baseline exceeded 5000 candidate files",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "bash-discovery",
+        "target": "litellm-proxy-extras/litellm_proxy_extras/prisma_toolchain.py",
+        "detail": "bash_discovery_incomplete: project enumeration exceeded 5000 reviewable files",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline",
+        "target": "litellm-proxy-extras/litellm_proxy_extras/prisma_toolchain.py",
+        "detail": "baseline_partial: baseline exceeded 5000 candidate files",
+        "affectsCompletion": true
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "060bb617abf22d9b815ab75773fa3e02966e1f39",
+  "diffHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "rulesVersion": "unavailable",
+  "sessionHash": "bcdaa8b3578c07e7fbe7b0717c4d16f3bc775815fa26306d2609a97ee51194cd",
+  "reportRef": ".mimosa/reports/task-review-sess_4dd766b0-1224-403e-a4d4-95898ee8c2ba-20261005T174006700Z-2202188-cc8c462f6f8a.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [],
+  "recordedAt": "2026-10-05T17:40:07.255Z"
+}

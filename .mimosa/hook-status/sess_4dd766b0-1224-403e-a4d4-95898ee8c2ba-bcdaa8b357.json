@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-10-05T17:02:08.613Z",
+  "sessionId": "sess_4dd766b0-1224-403e-a4d4-95898ee8c2ba",
+  "event": "PostToolUse",
+  "toolName": "Edit",
+  "file": "/home/hx/AI/Ext/litellm-worktrees/pr-40238/litellm/llms/xai/videos/transformation.py",
+  "outcome": "inconclusive",
+  "coverage": "partial",
+  "findingCount": 0,
+  "durationMs": 14,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

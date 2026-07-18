@@ -60,6 +60,7 @@ OPTIONAL_KWARGS_KEYS: Final = (
             "itpm",
             "otpm",
             "use_xai_oauth",
+            "xai_oauth_token_file",
             PROVIDER_AFFINITY_HEADER_KWARG_KEY,
         }
     )
