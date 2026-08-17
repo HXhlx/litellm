@@ -9670,6 +9670,10 @@ class ProviderConfigManager:
             return get_hosted_vllm_video_config(model)
         elif LlmProviders.EDENAI == provider:
             return litellm.EdenAIVideoConfig()
+        elif LlmProviders.XAI == provider:
+            from litellm.llms.xai.videos.transformation import XAIVideoConfig
+
+            return XAIVideoConfig()
         return None
 
     @staticmethod

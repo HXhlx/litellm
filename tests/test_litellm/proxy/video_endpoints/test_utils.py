@@ -17,10 +17,13 @@ are checked by the genuine decode round-trip.
 import pytest
 
 
+from unittest.mock import MagicMock
+
 from litellm.proxy.video_endpoints.utils import (
     encode_character_id_in_response,
     extract_model_from_target_model_names,
     get_custom_provider_from_data,
+    resolve_video_request_model,
     video_reference_to_id,
 )
 from litellm.types.videos.utils import (
@@ -56,6 +59,7 @@ def test_extract_model__non_str_non_list_is_none(value):
 
 
 # =========================================================================== #
+# =========================================================================== #
 # video_reference_to_id
 # =========================================================================== #
 
@@ -78,6 +82,48 @@ def test_extract_model__non_str_non_list_is_none(value):
 )
 def test_video_reference_to_id(video_ref, expected):
     assert video_reference_to_id(video_ref) == expected
+
+
+# =========================================================================== #
+# resolve_video_request_model
+# =========================================================================== #
+
+
+def test_resolve_video_model__resolved_name_wins():
+    router = MagicMock()
+    router.resolve_model_name_from_model_id.return_value = "azure-sora"
+    assert (
+        resolve_video_request_model(
+            model_id_from_decoded="deployment-123",
+            query_model="ignored",
+            llm_router=router,
+        )
+        == "azure-sora"
+    )
+
+
+def test_resolve_video_model__decode_survives_resolve_miss():
+    router = MagicMock()
+    router.resolve_model_name_from_model_id.return_value = None
+    assert (
+        resolve_video_request_model(
+            model_id_from_decoded="grok-imagine-video-1.5",
+            query_model="sora-2",
+            llm_router=router,
+        )
+        == "grok-imagine-video-1.5"
+    )
+
+
+def test_resolve_video_model__query_when_id_has_no_model():
+    assert (
+        resolve_video_request_model(
+            model_id_from_decoded=None,
+            query_model="grok-imagine-video-1.5",
+            llm_router=None,
+        )
+        == "grok-imagine-video-1.5"
+    )
 
 
 # =========================================================================== #
