@@ -26,6 +26,16 @@ class TestProviderDefaultProtocols:
         assert SupportedProtocol.OPENAI_CHAT in protocols
         assert SupportedProtocol.OPENAI_RESPONSES in protocols
 
+    def test_xai_supports_chat_and_responses(self):
+        """Verify xAI supports both Chat and Responses protocols.
+
+        xAI exposes a native /v1/responses endpoint (XAIResponsesAPIConfig), so
+        Responses-only clients like Codex reach it without a protocol bridge.
+        """
+        protocols = PROVIDER_DEFAULT_PROTOCOLS["xai"]
+        assert SupportedProtocol.OPENAI_CHAT in protocols
+        assert SupportedProtocol.OPENAI_RESPONSES in protocols
+
     def test_bedrock_supports_messages(self):
         """Verify Bedrock supports Anthropic Messages protocol."""
         protocols = PROVIDER_DEFAULT_PROTOCOLS["bedrock"]
