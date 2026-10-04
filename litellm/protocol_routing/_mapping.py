@@ -18,7 +18,7 @@ PROVIDER_DEFAULT_PROTOCOLS: Dict[str, List[SupportedProtocol]] = {
     "vllm": [SupportedProtocol.OPENAI_CHAT],
     "together_ai": [SupportedProtocol.OPENAI_CHAT],
     "groq": [SupportedProtocol.OPENAI_CHAT],
-    "xai": [SupportedProtocol.OPENAI_CHAT],
+    "xai": [SupportedProtocol.OPENAI_CHAT, SupportedProtocol.OPENAI_RESPONSES],
     "nvidia_nim": [SupportedProtocol.OPENAI_CHAT],
     "modelscope": [SupportedProtocol.OPENAI_CHAT],
     "volcengine": [SupportedProtocol.OPENAI_CHAT],

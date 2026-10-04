@@ -65,6 +65,20 @@ def gemini_deployment():
     }
 
 
+@pytest.fixture
+def xai_deployment():
+    """xAI deployment fixture."""
+    return {
+        "model_name": "grok-4.7",
+        "litellm_params": {
+            "model": "xai/grok-4.7",
+            "custom_llm_provider": "xai",
+            "api_key": "xai-test",
+        },
+        "model_info": {"id": "xai-1"},
+    }
+
+
 class TestFilterDeploymentsByProtocol:
     """Test filter_deployments_by_protocol function."""
 
@@ -143,6 +157,28 @@ class TestFilterDeploymentsByProtocol:
         )
         assert len(result) == 1
         assert result[0] == gemini_deployment
+
+    def test_strict_mode_keeps_xai_for_responses(self, xai_deployment, anthropic_deployment):
+        """Codex dials /v1/responses; xAI serves that protocol natively, so strict
+        mode must not reject the deployment and force a needless protocol bridge."""
+        deployments = [xai_deployment, anthropic_deployment]
+        result = filter_deployments_by_protocol(
+            deployments,
+            route_type="aresponses",
+            model="grok-4.7",
+            mode="strict",
+        )
+        assert result == [xai_deployment]
+
+    def test_strict_mode_keeps_xai_for_chat(self, xai_deployment):
+        """The Responses entry must not cost xAI its Chat Completions support."""
+        result = filter_deployments_by_protocol(
+            [xai_deployment],
+            route_type="acompletion",
+            model="grok-4.7",
+            mode="strict",
+        )
+        assert result == [xai_deployment]
 
     def test_strict_mode_raises_on_no_match(self, openai_deployment):
         """Verify strict mode raises ProtocolMismatchError when no deployments match."""
