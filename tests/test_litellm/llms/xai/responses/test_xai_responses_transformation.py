@@ -87,6 +87,38 @@ class TestXAIResponsesAPITransformation:
 
         assert mapped["instructions"] == "You are Codex."
 
+    def test_namespace_tool_group_inlined_as_qualified_functions(self):
+        """Codex wraps each MCP server's tools in a `namespace` group, a tool type
+        xAI rejects, so one group fails the whole request. Members must go out as
+        functions named `<namespace>__<tool>`."""
+        config = XAIResponsesAPIConfig()
+
+        params = ResponsesAPIOptionalRequestParams(
+            tools=[
+                {"type": "function", "name": "exec_command", "parameters": {}},
+                {
+                    "type": "namespace",
+                    "name": "mcp__gbrain",
+                    "description": "gbrain tools",
+                    "tools": [
+                        {"type": "function", "name": "search", "parameters": {}},
+                        {"type": "function", "name": "fetch", "parameters": {}},
+                    ],
+                },
+                {"type": "namespace", "name": "multi_agent_v1", "tools": [{"type": "function", "name": "spawn_agent"}]},
+            ]
+        )
+
+        result = config.map_openai_params(response_api_optional_params=params, model="grok-4.7", drop_params=True)
+
+        assert [tool["type"] for tool in result["tools"]] == ["function"] * 4, "no namespace type may survive"
+        assert [tool["name"] for tool in result["tools"]] == [
+            "exec_command",
+            "mcp__gbrain__search",
+            "mcp__gbrain__fetch",
+            "multi_agent_v1__spawn_agent",
+        ]
+
     def test_xai_responses_endpoint_url(self):
         """Test that get_complete_url returns correct XAI endpoint"""
         config = XAIResponsesAPIConfig()
@@ -414,3 +446,137 @@ class TestXAIResponsesWebSearchBilling:
 
         bridged = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(event.response.usage)
         assert getattr(bridged, "server_side_tool_usage_details") == self._TOOL_DETAILS
+
+
+class TestXAINamespaceToolRoundTrip:
+    """xAI has no `namespace` tool type, so Codex tool groups are inlined on the
+    way out and the (namespace, name) pair is restored on the way back."""
+
+    _NAMESPACE = "mcp__sequential_thinking"
+    _TOOL = "sequentialthinking"
+    _QUALIFIED = "mcp__sequential_thinking__sequentialthinking"
+
+    def _config_after_request(self, tools: list) -> XAIResponsesAPIConfig:
+        config = XAIResponsesAPIConfig()
+        config.map_openai_params(
+            response_api_optional_params=ResponsesAPIOptionalRequestParams(tools=tools),
+            model="grok-4.7",
+            drop_params=True,
+        )
+        return config
+
+    def _namespaced_config(self) -> XAIResponsesAPIConfig:
+        return self._config_after_request(
+            [
+                {
+                    "type": "namespace",
+                    "name": self._NAMESPACE,
+                    "tools": [{"type": "function", "name": self._TOOL}],
+                }
+            ]
+        )
+
+    def _raw_response(self, tool_name: str) -> MagicMock:
+        raw = MagicMock()
+        raw.json.return_value = {
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 1791128515,
+            "model": "grok-4.7",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": tool_name,
+                    "arguments": "{}",
+                    "namespace": None,
+                    "status": "completed",
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        }
+        raw.text = "{}"
+        raw.headers = {}
+        raw.status_code = 200
+        return raw
+
+    def test_non_streaming_function_call_restores_namespace(self):
+        config = self._namespaced_config()
+
+        response = config.transform_response_api_response(
+            model="grok-4.7",
+            raw_response=self._raw_response(self._QUALIFIED),
+            logging_obj=MagicMock(),
+        )
+
+        item = response.output[0]
+        assert item.name == self._TOOL, "Codex registers the tool under its bare name"
+        assert item.namespace == self._NAMESPACE, "without the namespace its router rejects the call"
+
+    def test_streaming_output_item_restores_namespace(self):
+        config = self._namespaced_config()
+
+        event = config.transform_streaming_response(
+            model="grok-4.7",
+            parsed_chunk={
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": self._QUALIFIED,
+                    "arguments": "",
+                    "namespace": None,
+                },
+            },
+            logging_obj=MagicMock(),
+        )
+
+        item = event.model_dump()["item"]
+        assert item["name"] == self._TOOL
+        assert item["namespace"] == self._NAMESPACE
+
+    def test_streaming_terminal_event_restores_namespace(self):
+        config = self._namespaced_config()
+
+        event = config.transform_streaming_response(
+            model="grok-4.7",
+            parsed_chunk={
+                "type": "response.completed",
+                "sequence_number": 7,
+                "response": self._raw_response(self._QUALIFIED).json.return_value,
+            },
+            logging_obj=MagicMock(),
+        )
+
+        item = event.response.output[0]
+        assert item.name == self._TOOL
+        assert item.namespace == self._NAMESPACE
+
+    def test_client_supplied_qualified_name_is_not_split(self):
+        """A client that already sends flat MCP names gets them back untouched."""
+        config = self._config_after_request([{"type": "function", "name": self._QUALIFIED}])
+
+        response = config.transform_response_api_response(
+            model="grok-4.7",
+            raw_response=self._raw_response(self._QUALIFIED),
+            logging_obj=MagicMock(),
+        )
+
+        item = response.output[0]
+        assert item.name == self._QUALIFIED
+        assert item.namespace is None
+
+    def test_unrelated_response_is_untouched_without_namespace_tools(self):
+        config = XAIResponsesAPIConfig()
+
+        response = config.transform_response_api_response(
+            model="grok-4.7",
+            raw_response=self._raw_response("exec_command"),
+            logging_obj=MagicMock(),
+        )
+
+        assert response.output[0].name == "exec_command"

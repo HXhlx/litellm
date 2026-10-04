@@ -1,4 +1,8 @@
-from typing import Any, Final
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Final
+
+import httpx
 
 import litellm
 from litellm._logging import verbose_logger
@@ -7,10 +11,79 @@ from litellm.exceptions import AuthenticationError
 from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
 from litellm.llms.xai.common_utils import XAIModelInfo
 from litellm.secret_managers.main import get_secret_str
-from litellm.types.llms.openai import ResponsesAPIOptionalRequestParams
+from litellm.types.llms.openai import (
+    ResponsesAPIOptionalRequestParams,
+    ResponsesAPIResponse,
+    ResponsesAPIStreamingResponse,
+)
 from litellm.types.llms.xai import XAIWebSearchTool, XAIXSearchTool
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import LlmProviders
+
+if TYPE_CHECKING:
+    from litellm.litellm_core_utils.litellm_logging import Logging as _LiteLLMLoggingObj
+
+    LiteLLMLoggingObj = _LiteLLMLoggingObj
+else:
+    LiteLLMLoggingObj = Any
+
+_NAMESPACE_TOOL_TYPE: Final = "namespace"
+_NAMESPACE_SEPARATOR: Final = "__"
+
+# qualified name -> (namespace, tool name as the client declared it)
+InlinedToolNames = Mapping[str, tuple[str, str]]
+
+
+def _qualified(namespace: str, name: str) -> str:
+    return f"{namespace}{_NAMESPACE_SEPARATOR}{name}"
+
+
+def _is_named_member(member: Any) -> bool:
+    return isinstance(member, dict) and isinstance(member.get("name"), str)
+
+
+def _rename_member(member: Any, namespace: str) -> tuple[Any, tuple[str, tuple[str, str]] | None]:
+    if not _is_named_member(member):
+        return member, None
+    qualified: Final = _qualified(namespace, member["name"])
+    return {**member, "name": qualified}, (qualified, (namespace, member["name"]))
+
+
+def _expand_namespace_tool(tool: Any) -> tuple[list[Any], list[tuple[str, tuple[str, str]]]]:
+    """One inbound tool -> (tools to send, qualified-name back-references).
+
+    A `namespace` group contributes its members under `<namespace>__<tool>`, the
+    qualified name Codex itself uses for MCP tools when they are not namespaced,
+    which keeps names unique across groups. Anything else passes through.
+    """
+    if not isinstance(tool, dict) or tool.get("type") != _NAMESPACE_TOOL_TYPE:
+        return [tool], []
+
+    namespace: Final = tool.get("name")
+    members: Final = tool.get("tools")
+    if not isinstance(namespace, str) or not namespace or not isinstance(members, list):
+        return [tool], []
+
+    renamed: Final = [_rename_member(member, namespace) for member in members]
+    return (
+        [out for out, _ in renamed],
+        [ref for _, ref in renamed if ref is not None],
+    )
+
+
+def _inline_namespace_tools(tools: list[Any]) -> tuple[list[Any], InlinedToolNames]:
+    """Replace `namespace` tool groups with their member tools.
+
+    xAI rejects `namespace` as a tool type, and Codex wraps every MCP server's
+    tools plus its sub-agent tools in one, so a single group fails the whole
+    request. The returned mapping lets the response side hand Codex back the
+    `(namespace, name)` pair it declared the tool under.
+    """
+    expanded: Final = [_expand_namespace_tool(tool) for tool in tools]
+    return (
+        [member for members, _ in expanded for member in members],
+        MappingProxyType({name: pair for _, pairs in expanded for name, pair in pairs}),
+    )
 
 
 class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
@@ -19,11 +92,18 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
 
     Inherits from OpenAIResponsesAPIConfig since XAI's Responses API is largely
     compatible with OpenAI's, with a few differences:
+    - Has no `namespace` tool type, so Codex tool groups are inlined
     - Requires code_interpreter tools to have 'container' field removed
     - Recommends store=false when sending images
 
     Reference: https://docs.x.ai/docs/api-reference#create-new-response
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Set per request in map_openai_params; the config instance is built per
+        # call by ProviderConfigManager, so this never spans two requests.
+        self._inlined_tool_names: InlinedToolNames = MappingProxyType({})
 
     @property
     def custom_llm_provider(self) -> LlmProviders:
@@ -108,6 +188,20 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
 
         return xai_tool
 
+    def _transform_tool(self, tool: Any) -> Any:
+        if not isinstance(tool, dict):
+            return tool
+
+        tool_type: Final = tool.get("type")
+        if tool_type == "code_interpreter":
+            # XAI supports code_interpreter but doesn't use the container field
+            return {"type": "code_interpreter"}
+        if tool_type == "web_search":
+            return self._transform_web_search_tool(tool)
+        if tool_type == "x_search":
+            return self._transform_x_search_tool(tool)
+        return tool
+
     def map_openai_params(
         self,
         response_api_optional_params: ResponsesAPIOptionalRequestParams,
@@ -118,10 +212,10 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
         Map parameters for XAI Responses API.
 
         Handles XAI-specific transformations:
-        1. Transforms code_interpreter tools to remove 'container' field
-        2. Transforms web_search tools to XAI format (removes search_context_size, adds filters)
-        3. Transforms x_search tools to XAI format
-        4. Sets store=false when images are detected (recommended by XAI)
+        1. Inlines `namespace` tool groups into qualified function tools
+        2. Transforms code_interpreter tools to remove 'container' field
+        3. Transforms web_search tools to XAI format (removes search_context_size, adds filters)
+        4. Transforms x_search tools to XAI format
         """
         params: Final = dict(response_api_optional_params)
 
@@ -129,42 +223,78 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
             verbose_logger.debug("XAI Responses API does not support 'metadata' parameter. Dropping it.")
             params.pop("metadata")
 
-        # Transform tools
-        if "tools" in params and params["tools"]:
-            tools_list = params["tools"]
-            # Ensure tools is a list for iteration
-            if not isinstance(tools_list, list):
-                tools_list = [tools_list]
-
-            transformed_tools: Final[list[Any]] = []
-            for tool in tools_list:
-                if isinstance(tool, dict):
-                    tool_type = tool.get("type")
-
-                    if tool_type == "code_interpreter":
-                        # XAI supports code_interpreter but doesn't use the container field
-                        verbose_logger.debug("XAI: Transforming code_interpreter tool, removing container field")
-                        transformed_tools.append({"type": "code_interpreter"})
-
-                    elif tool_type == "web_search":
-                        # Transform web_search to XAI format
-                        verbose_logger.debug("XAI: Transforming web_search tool to XAI format")
-                        transformed_tools.append(self._transform_web_search_tool(tool))
-
-                    elif tool_type == "x_search":
-                        # Transform x_search to XAI format
-                        verbose_logger.debug("XAI: Transforming x_search tool to XAI format")
-                        transformed_tools.append(self._transform_x_search_tool(tool))
-
-                    else:
-                        # Keep other tools as-is
-                        transformed_tools.append(tool)
-                else:
-                    transformed_tools.append(tool)
-
-            params["tools"] = transformed_tools
+        raw_tools: Final = params.get("tools")
+        if raw_tools:
+            tools_list: Final = raw_tools if isinstance(raw_tools, list) else [raw_tools]
+            inlined, inlined_names = _inline_namespace_tools(tools_list)
+            self._inlined_tool_names = inlined_names
+            params["tools"] = [self._transform_tool(tool) for tool in inlined]
 
         return params
+
+    def _restore_output_item(self, item: Any) -> Any:
+        """Give a tool call back the `(namespace, name)` pair the client declared.
+
+        Codex registers a namespaced tool under that pair and its router rejects
+        the qualified name we had to send xAI, so the split has to be undone on
+        the way back. Items are pydantic models on the non-streaming path and
+        plain dicts inside streaming chunks.
+        """
+        target: Final = self._inlined_tool_names.get(
+            item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+        )
+        if target is None:
+            return item
+
+        namespace, name = target
+        if isinstance(item, dict):
+            return {**item, "name": name, "namespace": namespace}
+        item.name = name
+        item.namespace = namespace
+        return item
+
+    def transform_response_api_response(
+        self,
+        model: str,
+        raw_response: httpx.Response,
+        logging_obj: LiteLLMLoggingObj,
+    ) -> ResponsesAPIResponse:
+        response: Final = super().transform_response_api_response(
+            model=model,
+            raw_response=raw_response,
+            logging_obj=logging_obj,
+        )
+        if self._inlined_tool_names:
+            response.output = [self._restore_output_item(item) for item in (response.output or [])]
+        return response
+
+    def transform_streaming_response(
+        self,
+        model: str,
+        parsed_chunk: dict,
+        logging_obj: LiteLLMLoggingObj,
+    ) -> ResponsesAPIStreamingResponse:
+        return super().transform_streaming_response(
+            model=model,
+            parsed_chunk=self._restore_chunk_tool_calls(parsed_chunk),
+            logging_obj=logging_obj,
+        )
+
+    def _restore_chunk_tool_calls(self, chunk: dict) -> dict:
+        if not self._inlined_tool_names or not isinstance(chunk, dict):
+            return chunk
+
+        patched: Final = dict(chunk)
+        if patched.get("item") is not None:
+            patched["item"] = self._restore_output_item(patched["item"])
+
+        response = patched.get("response")
+        if isinstance(response, dict) and isinstance(response.get("output"), list):
+            patched["response"] = {
+                **response,
+                "output": [self._restore_output_item(item) for item in response["output"]],
+            }
+        return patched
 
     def validate_environment(self, headers: dict, model: str, litellm_params: GenericLiteLLMParams | None) -> dict:
         """
