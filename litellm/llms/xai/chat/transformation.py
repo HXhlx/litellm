@@ -12,7 +12,7 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
     filter_value_from_dict,
     strip_name_from_messages,
 )
-from litellm.llms.xai.common_utils import XAIModelInfo, xai_reported_cost_in_usd
+from litellm.llms.xai.common_utils import XAIModelInfo, omit_tool_choice_without_tools, xai_reported_cost_in_usd
 from litellm.llms.xai.cost_calculator import (
     apply_server_side_tool_usage_details_to_usage,
 )
@@ -213,7 +213,7 @@ class XAIChatConfig(OpenAIGPTConfig):
             elif param in supported_openai_params:
                 if value is not None:
                     optional_params[param] = value
-        return optional_params
+        return omit_tool_choice_without_tools(optional_params)
 
     def get_model_response_iterator(
         self,

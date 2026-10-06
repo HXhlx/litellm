@@ -1,4 +1,5 @@
-from typing import Final
+from collections.abc import Mapping
+from typing import Any, Final
 
 import httpx
 
@@ -18,6 +19,16 @@ def xai_reported_cost_in_usd(cost_in_usd_ticks: object) -> float | None:
     if cost_in_usd_ticks < 0:
         return None
     return cost_in_usd_ticks / USD_TICKS_PER_DOLLAR
+
+
+_TOOL_FIELDS_WITHOUT_TOOLS: Final = frozenset({"tool_choice", "parallel_tool_calls", "tools"})
+
+
+def omit_tool_choice_without_tools(params: Mapping[str, Any]) -> dict[str, Any]:
+    """xAI 400s if tool_choice is set and tools is missing or empty."""
+    if params.get("tools"):
+        return dict(params)
+    return {key: value for key, value in params.items() if key not in _TOOL_FIELDS_WITHOUT_TOOLS}
 
 
 class XAIModelInfo(BaseLLMModelInfo):
