@@ -9,7 +9,7 @@ from litellm._logging import verbose_logger
 from litellm.constants import XAI_API_BASE
 from litellm.exceptions import AuthenticationError
 from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
-from litellm.llms.xai.common_utils import XAIModelInfo
+from litellm.llms.xai.common_utils import XAIModelInfo, omit_tool_choice_without_tools
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import (
     ResponsesAPIOptionalRequestParams,
@@ -230,7 +230,7 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
             self._inlined_tool_names = inlined_names
             params["tools"] = [self._transform_tool(tool) for tool in inlined]
 
-        return params
+        return omit_tool_choice_without_tools(params)
 
     def _restore_output_item(self, item: Any) -> Any:
         """Give a tool call back the `(namespace, name)` pair the client declared.

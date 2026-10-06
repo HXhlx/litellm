@@ -195,3 +195,27 @@ class TestXAIChatWebSearchBilling:
         )
 
         assert with_search - without_search == pytest.approx(3 * 5.0 / 1000.0)
+
+
+def test_tool_choice_dropped_without_tools():
+    mapped = XAIChatConfig().map_openai_params(
+        non_default_params={"tool_choice": "auto", "parallel_tool_calls": True, "temperature": 0.2},
+        optional_params={},
+        model="grok-4.7",
+        drop_params=True,
+    )
+    kept = XAIChatConfig().map_openai_params(
+        non_default_params={
+            "tool_choice": "auto",
+            "tools": [{"type": "function", "function": {"name": "exec_command"}}],
+        },
+        optional_params={},
+        model="grok-4.7",
+        drop_params=True,
+    )
+
+    assert "tool_choice" not in mapped
+    assert "parallel_tool_calls" not in mapped
+    assert mapped["temperature"] == 0.2
+    assert kept["tool_choice"] == "auto"
+    assert kept["tools"][0]["function"]["name"] == "exec_command"

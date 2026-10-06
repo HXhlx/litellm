@@ -119,6 +119,48 @@ class TestXAIResponsesAPITransformation:
             "multi_agent_v1__spawn_agent",
         ]
 
+    def test_tool_choice_dropped_when_compaction_sends_no_tools(self):
+        """Codex compaction sends tool_choice=auto with tools omitted or empty. xAI 400s."""
+        config = XAIResponsesAPIConfig()
+
+        missing = config.map_openai_params(
+            response_api_optional_params=ResponsesAPIOptionalRequestParams(
+                tool_choice="auto",
+                parallel_tool_calls=True,
+                instructions="compact",
+            ),
+            model="grok-4.7",
+            drop_params=True,
+        )
+        empty = config.map_openai_params(
+            response_api_optional_params=ResponsesAPIOptionalRequestParams(
+                tool_choice="auto",
+                parallel_tool_calls=True,
+                tools=[],
+            ),
+            model="grok-4.7",
+            drop_params=True,
+        )
+        kept = config.map_openai_params(
+            response_api_optional_params=ResponsesAPIOptionalRequestParams(
+                tool_choice="auto",
+                parallel_tool_calls=True,
+                tools=[{"type": "function", "name": "exec_command", "parameters": {}}],
+            ),
+            model="grok-4.7",
+            drop_params=True,
+        )
+
+        assert "tool_choice" not in missing
+        assert "parallel_tool_calls" not in missing
+        assert "tools" not in missing
+        assert missing["instructions"] == "compact"
+        assert "tool_choice" not in empty
+        assert "tools" not in empty
+        assert kept["tool_choice"] == "auto"
+        assert kept["parallel_tool_calls"] is True
+        assert kept["tools"][0]["name"] == "exec_command"
+
     def test_xai_responses_endpoint_url(self):
         """Test that get_complete_url returns correct XAI endpoint"""
         config = XAIResponsesAPIConfig()

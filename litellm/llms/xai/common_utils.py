@@ -1,4 +1,5 @@
-from typing import Final
+from collections.abc import Mapping
+from typing import Any, Final
 
 import httpx
 
@@ -7,6 +8,15 @@ from litellm.llms.base_llm.base_utils import BaseLLMModelInfo
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import AllMessageValues
 from litellm.types.utils import ProviderSpecificModelInfo
+
+_TOOL_FIELDS_WITHOUT_TOOLS: Final = frozenset({"tool_choice", "parallel_tool_calls", "tools"})
+
+
+def omit_tool_choice_without_tools(params: Mapping[str, Any]) -> dict[str, Any]:
+    """xAI 400s if tool_choice is set and tools is missing or empty."""
+    if params.get("tools"):
+        return dict(params)
+    return {key: value for key, value in params.items() if key not in _TOOL_FIELDS_WITHOUT_TOOLS}
 
 
 class XAIModelInfo(BaseLLMModelInfo):
