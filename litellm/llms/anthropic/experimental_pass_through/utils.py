@@ -61,10 +61,7 @@ def local_model_name(model: str, custom_llm_provider: object) -> str:
 
 def is_reasoning_auto_summary_enabled() -> bool:
     """Check whether the default 'summary: detailed' injection is enabled (opt-in)."""
-    return (
-        litellm.reasoning_auto_summary
-        or os.getenv("LITELLM_REASONING_AUTO_SUMMARY", "false").lower() == "true"
-    )
+    return litellm.reasoning_auto_summary or os.getenv("LITELLM_REASONING_AUTO_SUMMARY", "false").lower() == "true"
 
 
 def normalize_reasoning_effort_value(
@@ -83,16 +80,6 @@ def normalize_reasoning_effort_value(
     never degraded to, being an off switch rather than a tier; an always-on-thinking model is
     handled where the thinking block is built. A deployment accepting no tier at all keeps the
     chain's floor, which is what every deployment degraded to before there was anything to ask.
-    Degradation only happens when a capability flag is **explicitly False**.
-    Unknown models (flag absent/None) pass the effort through unchanged so
-    third-party Anthropic-compatible deployments are never silently downgraded.
-
-    Degradation chains (only when flag is False):
-    - "max"     → xhigh (if xhigh not False) / high
-    - "xhigh"   → high
-    - "minimal" → low
-    - other values pass through unchanged
-
     """
     chain: Final = _EFFORT_DEGRADATION_CHAIN.get(effort)
     if chain is None:
@@ -103,10 +90,6 @@ def normalize_reasoning_effort_value(
 
     try:
         model_info: Final[ModelInfo] = get_model_info(model=model, custom_llm_provider=custom_llm_provider)
-        model_info = get_model_info(
-            model=model, custom_llm_provider=custom_llm_provider
-        )
-
     except Exception:
         return chain[-1]
 
@@ -116,26 +99,3 @@ def normalize_reasoning_effort_value(
 
     accepted_tiers: Final = tuple(level for level in supported if level != _THINKING_OFF)
     return next((level for level in (*chain, *accepted_tiers) if level in supported), chain[-1])
-    def _flag(key: str) -> Optional[bool]:
-        """Return the flag value, or None when not declared."""
-        if not model_info:
-            return None
-        return model_info.get(key)
-
-    if effort == "max":
-        if _flag("supports_max_reasoning_effort") is False:
-            # max explicitly unsupported — try xhigh, then high
-            if _flag("supports_xhigh_reasoning_effort") is False:
-                return "high"
-            return "xhigh"
-        return "max"
-    elif effort == "xhigh":
-        if _flag("supports_xhigh_reasoning_effort") is False:
-            return "high"
-        return "xhigh"
-    elif effort == "minimal":
-        if _flag("supports_minimal_reasoning_effort") is False:
-            return "low"
-        return "minimal"
-    return "medium"
-

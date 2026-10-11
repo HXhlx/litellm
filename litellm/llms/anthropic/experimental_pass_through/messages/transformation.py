@@ -1,8 +1,6 @@
 import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, Final
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
-
 
 import httpx
 
@@ -36,11 +34,10 @@ from .mid_conversation_system import (
     convert_mid_conversation_system_turns,
     is_system_role_message,
 )
-from ..utils import normalize_reasoning_effort_value
 
-DEFAULT_ANTHROPIC_API_VERSION = "2023-06-01"
+DEFAULT_ANTHROPIC_API_VERSION: Final = "2023-06-01"
 
-DROP_UNSUPPORTED_ADAPTIVE_EFFORT_WARNING = (
+DROP_UNSUPPORTED_ADAPTIVE_EFFORT_WARNING: Final = (
     "Dropping adaptive `thinking`/`output_config.effort` for model=%s: the model "
     "does not support extended thinking, or max_tokens is too small to fit the "
     "minimum thinking budget."
@@ -58,7 +55,7 @@ def _messages_carry_output_config(messages: Sequence[object]) -> bool:
 
 class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
     @property
-    def custom_llm_provider(self) -> Optional[str]:
+    def custom_llm_provider(self) -> str | None:
         return "anthropic"
 
     @property
@@ -94,10 +91,6 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         return self._resolved_provider != "anthropic"
 
     def _remove_scope_from_cache_control(self, anthropic_messages_request: dict) -> None:
-    def _remove_scope_from_cache_control(
-        self, anthropic_messages_request: Dict
-    ) -> None:
-
         """
         Remove `scope` field from cache_control blocks.
 
@@ -116,7 +109,7 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
                     _sanitize(item["cache_control"])
 
         if "system" in anthropic_messages_request:
-            system = anthropic_messages_request["system"]
+            system: Final = anthropic_messages_request["system"]
             if isinstance(system, list):
                 _process_content_list(system)
 
@@ -154,15 +147,13 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             return system_param
         elif isinstance(system_param, list):
             # Filter list of system content blocks
-            filtered_list = []
+            filtered_list: Final = []
             for content_block in system_param:
                 if isinstance(content_block, dict):
                     text = content_block.get("text", "")
                     content_type = content_block.get("type", "")
                     # Skip text blocks that start with billing header
-                    if content_type == "text" and text.startswith(
-                        "x-anthropic-billing-header:"
-                    ):
+                    if content_type == "text" and text.startswith("x-anthropic-billing-header:"):
                         continue
                     filtered_list.append(content_block)
                 else:
@@ -204,7 +195,7 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         path forwards ``messages`` untouched and never calls it."""
         from litellm.utils import _supports_factory
 
-        messages = anthropic_messages_request.get("messages")
+        messages: Final = anthropic_messages_request.get("messages")
         if not isinstance(messages, list):
             return
         leading_count: Final = next(
@@ -218,21 +209,12 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
                 model=model,
                 custom_llm_provider=self.custom_llm_provider,
                 key="supports_mid_conversation_system",
-        if _supports_factory(
-            model=model,
-            custom_llm_provider=self.custom_llm_provider,
-            key="supports_mid_conversation_system",
-        ):
-            leading_count = next(
-                (i for i, m in enumerate(messages) if not self._is_system_role_message(m)),
-                len(messages),
-
             )
             else list(convert_mid_conversation_system_turns(messages[leading_count:]))
         )
         if hoisted or remaining != messages:
             anthropic_messages_request["messages"] = remaining
-        system_content = [
+        system_content: Final = [
             block
             for source in (
                 anthropic_messages_request.get("system"),
@@ -240,7 +222,7 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             )
             for block in as_system_content_blocks(source)
         ]
-        filtered_system = self._filter_billing_headers_from_system(system_content)
+        filtered_system: Final = self._filter_billing_headers_from_system(system_content)
         if filtered_system:
             anthropic_messages_request["system"] = filtered_system
         else:
@@ -248,16 +230,14 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
 
     def get_complete_url(
         self,
-        api_base: Optional[str],
-        api_key: Optional[str],
+        api_base: str | None,
+        api_key: str | None,
         model: str,
         optional_params: dict,
         litellm_params: dict,
-        stream: Optional[bool] = None,
+        stream: bool | None = None,
     ) -> str:
-        api_base = (
-            AnthropicModelInfo.get_api_base(api_base) or "https://api.anthropic.com"
-        )
+        api_base = AnthropicModelInfo.get_api_base(api_base) or "https://api.anthropic.com"
         if not api_base.endswith("/v1/messages"):
             api_base = f"{api_base}/v1/messages"
         return api_base
@@ -266,16 +246,14 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         self,
         headers: dict,
         model: str,
-        messages: List[Any],
+        messages: list[Any],
         optional_params: dict,
         litellm_params: dict,
-        api_key: Optional[str] = None,
-        api_base: Optional[str] = None,
-    ) -> Tuple[dict, Optional[str]]:
+        api_key: str | None = None,
+        api_base: str | None = None,
+    ) -> tuple[dict, str | None]:
         # Check for Anthropic OAuth token in Authorization header
-        headers, api_key = optionally_handle_anthropic_oauth(
-            headers=headers, api_key=api_key
-        )
+        headers, api_key = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key)
 
         header_names: Final = frozenset(name.lower() for name in headers)
         if "x-api-key" not in header_names and "authorization" not in header_names:
@@ -291,11 +269,6 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
                     model=model,
                 )
             headers.update(auth_header)
-        if "x-api-key" not in headers and "authorization" not in headers:
-            auth_header = AnthropicModelInfo.get_auth_header(api_key)
-            if auth_header is not None:
-                headers.update(auth_header)
-
         if "anthropic-version" not in headers:
             headers["anthropic-version"] = DEFAULT_ANTHROPIC_API_VERSION
         if "content-type" not in headers:
@@ -312,8 +285,6 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
     @staticmethod
     def _translate_reasoning_effort_to_anthropic(
         model: str, optional_params: dict, max_tokens: int | None, custom_llm_provider: str
-        model: str, optional_params: Dict, custom_llm_provider: str
-
     ) -> None:
         """Map OpenAI-style ``reasoning_effort`` to native Anthropic params.
 
@@ -328,12 +299,12 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             AnthropicConfig,
         )
 
-        reasoning_effort = optional_params.pop("reasoning_effort", None)
+        reasoning_effort: Final = optional_params.pop("reasoning_effort", None)
         if not isinstance(reasoning_effort, str):
             return
 
         try:
-            mapped_thinking = AnthropicConfig._map_reasoning_effort(
+            mapped_thinking: Final = AnthropicConfig._map_reasoning_effort(
                 reasoning_effort=reasoning_effort,
                 model=model,
                 custom_llm_provider=custom_llm_provider,
@@ -353,9 +324,7 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
 
         optional_params.setdefault("thinking", fitted_thinking)
         if AnthropicModelInfo._is_adaptive_thinking_model(model, custom_llm_provider):
-            mapped_effort = REASONING_EFFORT_TO_OUTPUT_CONFIG_EFFORT.get(
-                reasoning_effort
-            )
+            mapped_effort: Final = REASONING_EFFORT_TO_OUTPUT_CONFIG_EFFORT.get(reasoning_effort)
             if mapped_effort is None:
                 raise AnthropicError(
                     message=(
@@ -365,17 +334,9 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
                     ),
                     status_code=400,
                 )
-            gate_error = AnthropicConfig._validate_effort_for_model(
-                model, mapped_effort, custom_llm_provider
-            )
+            gate_error: Final = AnthropicConfig._validate_effort_for_model(model, mapped_effort, custom_llm_provider)
             if gate_error is not None:
-                normalized_effort = normalize_reasoning_effort_value(
-                    mapped_effort, model, custom_llm_provider
-                )
-                if normalized_effort != mapped_effort:
-                    mapped_effort = normalized_effort
-                else:
-                    raise AnthropicError(message=gate_error, status_code=400)
+                raise AnthropicError(message=gate_error, status_code=400)
             existing_output_config = optional_params.get("output_config")
             if not isinstance(existing_output_config, dict):
                 existing_output_config = {}
@@ -383,48 +344,8 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             optional_params["output_config"] = existing_output_config
 
     @staticmethod
-    def _translate_legacy_thinking_for_adaptive_model(
-        model: str, optional_params: Dict, custom_llm_provider: str
-    ) -> None:
-        """Translate legacy ``thinking.type=enabled`` to adaptive for 4.6/4.7.
-        Caller-provided ``output_config.effort`` is never overridden.
-        """
-        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
-
-        if not AnthropicModelInfo._is_adaptive_thinking_model(
-            model, custom_llm_provider
-        ):
-            return
-        thinking = optional_params.get("thinking")
-        if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
-            return
-
-        budget = int(thinking.get("budget_tokens") or 0)
-        if budget >= DEFAULT_REASONING_EFFORT_XHIGH_THINKING_BUDGET and (
-            AnthropicConfig._supports_effort_level(model, "xhigh", custom_llm_provider)
-        ):
-            effort = "xhigh"
-        elif budget >= DEFAULT_REASONING_EFFORT_HIGH_THINKING_BUDGET:
-            effort = "high"
-        elif budget >= DEFAULT_REASONING_EFFORT_MEDIUM_THINKING_BUDGET:
-            effort = "medium"
-        else:
-            effort = "low"
-
-        optional_params["thinking"] = {"type": "adaptive"}
-        existing_output_config = optional_params.get("output_config")
-        if not isinstance(existing_output_config, dict):
-            existing_output_config = {}
-        existing_output_config.setdefault("effort", effort)
-        optional_params["output_config"] = existing_output_config
-
-    @staticmethod
-
     def _translate_adaptive_effort_for_non_adaptive_model(
-        model: str,
-        optional_params: Dict,
-        max_tokens: Optional[int],
-        custom_llm_provider: str,
+        model: str, optional_params: dict, max_tokens: int | None, custom_llm_provider: str
     ) -> None:
         """Translate the 4.6+ adaptive-thinking interface (``thinking.type=adaptive``
         and/or ``output_config.effort``) down to what an older Anthropic model
@@ -470,14 +391,10 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         if AnthropicConfig._is_adaptive_thinking_model(model, custom_llm_provider):
             return
 
-        output_config = optional_params.get("output_config")
-        thinking = optional_params.get("thinking")
-        effort = (
-            output_config.get("effort") if isinstance(output_config, dict) else None
-        )
-        adaptive_thinking = (
-            isinstance(thinking, dict) and thinking.get("type") == "adaptive"
-        )
+        output_config: Final = optional_params.get("output_config")
+        thinking: Final = optional_params.get("thinking")
+        effort: Final = output_config.get("effort") if isinstance(output_config, dict) else None
+        adaptive_thinking: Final = isinstance(thinking, dict) and thinking.get("type") == "adaptive"
         if effort is None and not adaptive_thinking:
             return
 
@@ -486,24 +403,19 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         # reject. Effort-only requests pass through so provider subclasses (bedrock/vertex) keep
         # owning level clamping; an adaptive request only stays here when its effort level is one
         # the model supports, otherwise it falls through to the legacy budget translation below.
-        if AnthropicConfig._model_supports_effort_param(
-            model, custom_llm_provider
-        ) and (
+        if AnthropicConfig._model_supports_effort_param(model, custom_llm_provider) and (
             not adaptive_thinking
-            or AnthropicConfig._validate_effort_for_model(
-                model, effort, custom_llm_provider
-            )
-            is None
+            or AnthropicConfig._validate_effort_for_model(model, effort, custom_llm_provider) is None
         ):
             if adaptive_thinking:
                 optional_params.pop("thinking", None)
             return
 
-        supports_thinking = AnthropicModelInfo._supports_model_capability(
+        supports_thinking: Final = AnthropicModelInfo._supports_model_capability(
             model, "supports_reasoning", custom_llm_provider
         )
         try:
-            legacy_thinking = (
+            legacy_thinking: Final = (
                 AnthropicConfig._map_reasoning_effort(
                     reasoning_effort=effort or "medium",
                     model=model,
@@ -516,11 +428,6 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             raise AnthropicError(message=str(e.message), status_code=400)
         capped_thinking: Final = (
             AnthropicConfig.cap_thinking_budget_to_max_tokens(legacy_thinking, max_tokens)
-        capped_thinking = (
-            AnthropicConfig._cap_thinking_budget_to_max_tokens(
-                legacy_thinking, max_tokens
-            )
-
             if legacy_thinking is not None
             else None
         )
@@ -532,7 +439,7 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             optional_params.pop("thinking", None)
 
         if isinstance(output_config, dict) and "effort" in output_config:
-            residual = {k: v for k, v in output_config.items() if k != "effort"}
+            residual: Final = {k: v for k, v in output_config.items() if k != "effort"}
             if residual:
                 optional_params["output_config"] = residual
             else:
@@ -558,35 +465,31 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         """
         if AnthropicModelInfo._is_adaptive_thinking_model(model, custom_llm_provider):
             return
-        temperature = optional_params.get("temperature")
+        temperature: Final = optional_params.get("temperature")
         if temperature is None or temperature == 1:
             return
-        thinking = optional_params.get("thinking")
-        output_config = optional_params.get("output_config")
-        thinking_enabled = (
-            isinstance(thinking, dict) and thinking.get("type") == "enabled"
-        )
-        effort_enabled = (
-            isinstance(output_config, dict) and output_config.get("effort") is not None
-        )
+        thinking: Final = optional_params.get("thinking")
+        output_config: Final = optional_params.get("output_config")
+        thinking_enabled: Final = isinstance(thinking, dict) and thinking.get("type") == "enabled"
+        effort_enabled: Final = isinstance(output_config, dict) and output_config.get("effort") is not None
         if thinking_enabled or effort_enabled:
             optional_params.pop("temperature", None)
 
     def transform_anthropic_messages_request(
         self,
         model: str,
-        messages: List[Dict],
-        anthropic_messages_optional_request_params: Dict,
+        messages: list[dict],
+        anthropic_messages_optional_request_params: dict,
         litellm_params: GenericLiteLLMParams,
         headers: dict,
-    ) -> Dict:
+    ) -> dict:
         """
         No transformation is needed for Anthropic messages
 
 
         This takes in a request in the Anthropic /v1/messages API spec -> transforms it to /v1/messages API spec (i.e) no transformation is needed
         """
-        max_tokens = anthropic_messages_optional_request_params.pop("max_tokens", None)
+        max_tokens: Final = anthropic_messages_optional_request_params.pop("max_tokens", None)
         if max_tokens is None:
             raise AnthropicError(
                 message="max_tokens is required for Anthropic /v1/messages API",
@@ -625,30 +528,24 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             custom_llm_provider=self._resolved_provider,
         )
 
-        system_param = anthropic_messages_optional_request_params.get("system")
+        system_param: Final = anthropic_messages_optional_request_params.get("system")
         if self.should_strip_billing_metadata() and system_param is not None:
-            filtered_system = self._filter_billing_headers_from_system(system_param)
+            filtered_system: Final = self._filter_billing_headers_from_system(system_param)
             if filtered_system is not None and len(filtered_system) > 0:
                 anthropic_messages_optional_request_params["system"] = filtered_system
             else:
                 anthropic_messages_optional_request_params.pop("system", None)
 
         # Transform context_management from OpenAI format to Anthropic format if needed
-        context_management_param = anthropic_messages_optional_request_params.get(
-            "context_management"
-        )
+        context_management_param: Final = anthropic_messages_optional_request_params.get("context_management")
         if context_management_param is not None:
             from litellm.llms.anthropic.chat.transformation import AnthropicConfig
 
-            transformed_context_management = (
-                AnthropicConfig.map_openai_context_management_to_anthropic(
-                    context_management_param
-                )
+            transformed_context_management: Final = AnthropicConfig.map_openai_context_management_to_anthropic(
+                context_management_param
             )
             if transformed_context_management is not None:
-                anthropic_messages_optional_request_params["context_management"] = (
-                    transformed_context_management
-                )
+                anthropic_messages_optional_request_params["context_management"] = transformed_context_management
 
         ####### get required params for all anthropic messages requests ######
         # Lazy %s: the f-string previously stringified the entire messages
@@ -658,19 +555,13 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
 
         # Auto-strip advisor blocks from history if advisor tool is absent.
         # Prevents Anthropic 400: advisor_tool_result in history requires advisor tool.
-        _tools = anthropic_messages_optional_request_params.get("tools") or []
-        _has_advisor = any(
-            isinstance(t, dict) and t.get("type") == ANTHROPIC_ADVISOR_TOOL_TYPE
-            for t in _tools
-        )
+        _tools: Final = anthropic_messages_optional_request_params.get("tools") or []
+        _has_advisor: Final = any(isinstance(t, dict) and t.get("type") == ANTHROPIC_ADVISOR_TOOL_TYPE for t in _tools)
         if not _has_advisor:
-            messages = strip_advisor_blocks_from_messages(messages)  # type: ignore[assignment]
+            messages = strip_advisor_blocks_from_messages(messages)
 
         anthropic_messages_request: Final[AnthropicMessagesRequest] = AnthropicMessagesRequest(
             messages=strip_encrypted_reasoning_blocks_from_anthropic_messages(messages),
-        anthropic_messages_request: AnthropicMessagesRequest = AnthropicMessagesRequest(
-            messages=messages,
-
             max_tokens=max_tokens,
             model=model,
             **anthropic_messages_optional_request_params,
@@ -687,11 +578,9 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         No transformation is needed for Anthropic messages, since we want the response in the Anthropic /v1/messages API spec
         """
         try:
-            raw_response_json = raw_response.json()
+            raw_response_json: Final = raw_response.json()
         except Exception:
-            raise AnthropicError(
-                message=raw_response.text, status_code=raw_response.status_code
-            )
+            raise AnthropicError(message=raw_response.text, status_code=raw_response.status_code)
         return AnthropicMessagesResponse(**raw_response_json)
 
     def get_async_streaming_response_iterator(
@@ -707,7 +596,7 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         )
 
         # Use the shared streaming handler for Anthropic
-        handler = BaseAnthropicMessagesStreamingIterator(
+        handler: Final = BaseAnthropicMessagesStreamingIterator(
             litellm_logging_obj=litellm_logging_obj,
             request_body=request_body,
         )
@@ -741,7 +630,7 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             custom_llm_provider: Provider name for looking up correct tool search header
             messages: Request messages, scanned for per-message output_config
         """
-        beta_values: set = set()
+        beta_values: Final[set] = set()
 
         existing_beta: Final = tuple(
             piece.strip()
@@ -752,26 +641,19 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         )
         beta_values.update(existing_beta)
 
-        if requires_native_compaction_beta(custom_llm_provider, optional_params, messages):
-            beta_values.add(ANTHROPIC_BETA_HEADER_VALUES.COMPACT_2026_09_04.value)
-        # Get existing beta headers if any
-        existing_beta = headers.get("anthropic-beta")
-        if existing_beta:
-            beta_values.update(b.strip() for b in existing_beta.split(","))
-
-
         # Auto-add context-1m beta header when [1m] suffix is present
         _original_model = optional_params.get("_original_model", "")
         if re.search(r"\[1m\]$", _original_model):
             beta_values.add("context-1m-2025-08-07")
 
+        if requires_native_compaction_beta(custom_llm_provider, optional_params, messages):
+            beta_values.add(ANTHROPIC_BETA_HEADER_VALUES.COMPACT_2026_09_04.value)
+
         # Check for context management
-        context_management_param = optional_params.get("context_management")
+        context_management_param: Final = optional_params.get("context_management")
         if context_management_param is not None:
             # Check edits array for compact_20260112 type
             edits: Final = context_management_param.get("edits", ())
-            edits = context_management_param.get("edits", [])
-
             has_compact = False
             has_other = False
 
@@ -788,20 +670,16 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
 
             # Add context management header if any other edits exist
             if has_other:
-                beta_values.add(
-                    ANTHROPIC_BETA_HEADER_VALUES.CONTEXT_MANAGEMENT_2025_06_27.value
-                )
+                beta_values.add(ANTHROPIC_BETA_HEADER_VALUES.CONTEXT_MANAGEMENT_2025_06_27.value)
 
         # Check for structured outputs. Anthropic's newer request shape nests
         # the schema under output_config.format; the older top-level
         # output_format remains supported for backwards compatibility.
-        output_config = optional_params.get("output_config")
+        output_config: Final = optional_params.get("output_config")
         if optional_params.get("output_format") is not None or (
             isinstance(output_config, dict) and output_config.get("format") is not None
         ):
-            beta_values.add(
-                ANTHROPIC_BETA_HEADER_VALUES.STRUCTURED_OUTPUT_2025_09_25.value
-            )
+            beta_values.add(ANTHROPIC_BETA_HEADER_VALUES.STRUCTURED_OUTPUT_2025_09_25.value)
 
         # Check for fast mode
         if optional_params.get("speed") == "fast":
@@ -813,28 +691,6 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         tools: Final = optional_params.get("tools")
         if any(isinstance(tool, dict) and tool.get("type") == ANTHROPIC_ADVISOR_TOOL_TYPE for tool in tools or ()):
             beta_values.add(ANTHROPIC_BETA_HEADER_VALUES.ADVISOR_TOOL_2026_03_01.value)
-        # Check for advisor tool
-        tools = optional_params.get("tools")
-        if tools:
-            for tool in tools:
-                if (
-                    isinstance(tool, dict)
-                    and tool.get("type") == ANTHROPIC_ADVISOR_TOOL_TYPE
-                ):
-                    beta_values.add(
-                        ANTHROPIC_BETA_HEADER_VALUES.ADVISOR_TOOL_2026_03_01.value
-                    )
-                    break
-
-        # Check for tool search tools
-        tools = optional_params.get("tools")
-        if tools:
-            anthropic_model_info = AnthropicModelInfo()
-            if anthropic_model_info.is_tool_search_used(tools):
-                # Use provider-specific tool search header
-                tool_search_header = get_tool_search_beta_header(custom_llm_provider)
-                beta_values.add(tool_search_header)
-
 
         if AnthropicModelInfo().is_tool_search_used(tools):
             beta_values.add(get_tool_search_beta_header(custom_llm_provider))

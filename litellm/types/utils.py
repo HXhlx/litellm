@@ -3850,7 +3850,6 @@ _PRICING_FIELD_EXEMPTIONS: Final[frozenset[str]] = frozenset({"output_vector_siz
 SERVER_DERIVED_PRICING_FIELDS: Final[frozenset[str]] = (
     frozenset(CustomPricingLiteLLMParams.model_fields) - _PRICING_FIELD_EXEMPTIONS
 )
-)
 
 
 def is_server_derived_pricing_key(key: str) -> bool:
