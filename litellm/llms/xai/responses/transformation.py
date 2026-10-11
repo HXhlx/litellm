@@ -3,7 +3,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
-
 from pydantic import TypeAdapter
 
 import litellm
@@ -22,7 +21,6 @@ from litellm.types.llms.openai import (
     ResponsesAPIResponse,
     ResponsesAPIStreamingResponse,
 )
-from litellm.types.llms.xai import XAIWebSearchTool, XAIXSearchTool
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import LlmProviders
 
@@ -43,6 +41,7 @@ def _usage_restated_from_xai_ticks(usage: ResponseAPIUsage | None) -> ResponseAP
     if usage is None or reported_cost is None:
         return None
     return usage.model_copy(update=MappingProxyType({"cost": reported_cost}))
+
 
 _NAMESPACE_TOOL_TYPE: Final = "namespace"
 _NAMESPACE_SEPARATOR: Final = "__"
@@ -296,33 +295,6 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
         item.namespace = namespace
         return item
 
-    def transform_response_api_response(
-        self,
-        model: str,
-        raw_response: httpx.Response,
-        logging_obj: LiteLLMLoggingObj,
-    ) -> ResponsesAPIResponse:
-        response: Final = super().transform_response_api_response(
-            model=model,
-            raw_response=raw_response,
-            logging_obj=logging_obj,
-        )
-        if self._inlined_tool_names:
-            response.output = [self._restore_output_item(item) for item in (response.output or [])]
-        return response
-
-    def transform_streaming_response(
-        self,
-        model: str,
-        parsed_chunk: dict,
-        logging_obj: LiteLLMLoggingObj,
-    ) -> ResponsesAPIStreamingResponse:
-        return super().transform_streaming_response(
-            model=model,
-            parsed_chunk=self._restore_chunk_tool_calls(parsed_chunk),
-            logging_obj=logging_obj,
-        )
-
     def _restore_chunk_tool_calls(self, chunk: dict) -> dict:
         if not self._inlined_tool_names or not isinstance(chunk, dict):
             return chunk
@@ -419,6 +391,8 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
         restated_usage: Final = _usage_restated_from_xai_ticks(response.usage)
         if restated_usage is not None:
             response.usage = restated_usage
+        if self._inlined_tool_names:
+            response.output = [self._restore_output_item(item) for item in (response.output or [])]
         return response
 
     def transform_streaming_response(
@@ -429,7 +403,7 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
     ) -> ResponsesAPIStreamingResponse:
         event: Final = super().transform_streaming_response(
             model=model,
-            parsed_chunk=parsed_chunk,
+            parsed_chunk=self._restore_chunk_tool_calls(parsed_chunk),
             logging_obj=logging_obj,
         )
         if not isinstance(event, (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent)):
