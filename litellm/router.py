@@ -12857,6 +12857,15 @@ class Router:
         - Dict, if specific model chosen
         """
 
+        # Strip the proxy-internal protocol marker FIRST, before any early
+        # return. Model-id lookups (has_model_id) and specific_deployment=True
+        # return a single dict before the protocol filter below runs; popping
+        # here guarantees the marker never reaches provider calls via
+        # input_kwargs on any path.
+        _route_type = None
+        if request_kwargs is not None:
+            _route_type = request_kwargs.pop("_route_type", None)
+
         model, healthy_deployments = self._common_checks_available_deployment(
             model=model,
             messages=messages,
@@ -12923,9 +12932,6 @@ class Router:
         # Protocol strict-mode filter (opt-in). In bridged mode this is a no-op.
         from litellm.protocol_routing import filter_deployments_by_protocol
 
-        _route_type = None
-        if request_kwargs is not None:
-            _route_type = request_kwargs.pop("_route_type", None)
         if _route_type is not None:
             healthy_deployments = filter_deployments_by_protocol(
                 healthy_deployments=cast(list[dict], healthy_deployments),
@@ -14010,6 +14016,13 @@ class Router:
         """
         Returns the deployment based on routing strategy
         """
+        # The sync path has no protocol filter, but the proxy may still pass
+        # the internal _route_type marker in request_kwargs. Pop it here so it
+        # never leaks into provider calls via input_kwargs. Mirrors the pop at
+        # the top of async_get_healthy_deployments.
+        if request_kwargs is not None:
+            request_kwargs.pop("_route_type", None)
+
         if self.routing_plugins:
             raise ValueError(
                 "Router(plugins=[...]) is configured, but this call resolved to the synchronous "

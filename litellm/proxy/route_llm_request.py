@@ -55,6 +55,17 @@ def _is_a2a_agent_model(model_name: object) -> bool:
     return isinstance(model_name, str) and model_name.startswith("a2a/")
 
 
+def _strip_internal_routing_markers(data: dict) -> None:
+    """Drop proxy-internal routing markers before direct provider calls.
+
+    ``_route_type`` is consumed by ``Router.async_get_healthy_deployments``
+    for protocol filtering; it must never reach litellm/provider functions.
+    Router-bound dispatches keep it (the router strips it after filtering);
+    every direct ``getattr(litellm, ...)`` dispatch must call this first.
+    """
+    data.pop("_route_type", None)
+
+
 def _raise_if_model_fully_blocked(llm_router: LitellmRouter, model_name: object, team_id: str | None) -> None:
     if not isinstance(model_name, str) or not model_name:
         return
@@ -480,7 +491,16 @@ async def _route_request_single_attempt(  # noqa: ANN202  # returns unawaited pr
 
     # Propagate route_type so downstream filters (protocol_routing) can inspect
     # the incoming protocol without changing existing function signatures.
-    data["_route_type"] = route_type
+    # Only inject for route types the protocol filter understands; every other
+    # route (containers, video, evals, vector stores, ...) would carry the
+    # marker straight through to the provider since it never passes the
+    # router's protocol filter.
+    from litellm.protocol_routing._types import ROUTE_TYPE_TO_PROTOCOL
+
+    if route_type in ROUTE_TYPE_TO_PROTOCOL:
+        data["_route_type"] = route_type
+    else:
+        data.pop("_route_type", None)
 
     data.pop("enable_tag_filtering", None)
 
@@ -507,6 +527,7 @@ async def _route_request_single_attempt(  # noqa: ANN202  # returns unawaited pr
         if llm_router is not None:
             return getattr(llm_router, f"{route_type}")(**data)
         else:
+            _strip_internal_routing_markers(data)
             return getattr(litellm, f"{route_type}")(**data)
 
     elif (
@@ -554,6 +575,7 @@ async def _route_request_single_attempt(  # noqa: ANN202  # returns unawaited pr
         if llm_router is not None:
             return getattr(llm_router, f"{route_type}")(**data)
         else:
+            _strip_internal_routing_markers(data)
             return getattr(litellm, f"{route_type}")(**data)
     elif llm_router is not None:
         _raise_if_model_fully_blocked(llm_router=llm_router, model_name=data.get("model"), team_id=team_id)
@@ -595,6 +617,7 @@ async def _route_request_single_attempt(  # noqa: ANN202  # returns unawaited pr
                     # If we can't get deployment creds, continue without them
                     pass
 
+            _strip_internal_routing_markers(data)
             return getattr(litellm, f"{route_type}")(**data)
         # Skip model-based routing for container operations
         if route_type in [
@@ -646,6 +669,7 @@ async def _route_request_single_attempt(  # noqa: ANN202  # returns unawaited pr
             "aingest",
         ] and (data.get("model") is None or data.get("model") == ""):
             # These endpoints don't need a model, use custom_llm_provider directly
+            _strip_internal_routing_markers(data)
             return getattr(litellm, f"{route_type}")(**data)
 
         team_model_name: Final = llm_router.map_team_model(data["model"], team_id) if team_id is not None else None
@@ -664,6 +688,7 @@ async def _route_request_single_attempt(  # noqa: ANN202  # returns unawaited pr
             # Check wildcards before checking deployment_names
             # Priority: 1. Exact model_name match, 2. Wildcard match, 3. deployment_names match
             if llm_router.router_general_settings.pass_through_all_models:
+                _strip_internal_routing_markers(data)
                 return getattr(litellm, f"{route_type}")(**data)
             elif llm_router.default_deployment is not None or len(llm_router.pattern_router.patterns) > 0:
                 return getattr(llm_router, f"{route_type}")(**data)
@@ -716,6 +741,7 @@ async def _route_request_single_attempt(  # noqa: ANN202  # returns unawaited pr
                     return getattr(llm_router, f"{route_type}")(**data)
                 except Exception:
                     # If router fails (e.g., model not found in router), fall back to direct call
+                    _strip_internal_routing_markers(data)
                     return getattr(litellm, f"{route_type}")(**data)
             elif _is_a2a_agent_model(data.get("model", "")):
                 from litellm.proxy.agent_endpoints.a2a_routing import (
@@ -728,6 +754,7 @@ async def _route_request_single_attempt(  # noqa: ANN202  # returns unawaited pr
                 # Fall through to raise exception below if result is None
 
     elif user_model is not None or route_type == "allm_passthrough_route":
+        _strip_internal_routing_markers(data)
         return getattr(litellm, f"{route_type}")(**data)
 
     # if no route found then it's a bad request
