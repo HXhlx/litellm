@@ -153,3 +153,8 @@ coverage-rust.xml
 
 proxy_config.yaml.bak.*
 snapshots/
+
+.mimosa/
+.v2c/
+api_key
+archive-*/
