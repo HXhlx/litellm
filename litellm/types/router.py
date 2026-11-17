@@ -636,6 +636,14 @@ class GenericLiteLLMParams(CredentialLiteLLMParams, CustomPricingLiteLLMParams):
         default=False,
         description="Use stored xAI OAuth credentials when no xAI API key is configured.",
     )
+    xai_oauth_token_file: str | None = Field(
+        default=None,
+        description=(
+            "Per-deployment xAI OAuth token file path. When set with use_xai_oauth=True, "
+            "the request reads that account's OAuth credentials instead of the global "
+            "token file, enabling multi-account SuperGrok routing."
+        ),
+    )
     chatgpt_auth_file: str | None = Field(
         default=None,
         description="Path to a ChatGPT OAuth auth.json for this deployment.",

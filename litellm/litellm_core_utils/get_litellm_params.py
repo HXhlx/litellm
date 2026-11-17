@@ -79,6 +79,7 @@ OPTIONAL_KWARGS_KEYS: Final = (
             "rpd",
             "daily_reset_time",
             "use_xai_oauth",
+            "xai_oauth_token_file",
             "chatgpt_auth_file",
             "github_copilot_auth_type",
             "github_copilot_host",

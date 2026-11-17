@@ -14,7 +14,12 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
     filter_value_from_dict,
     strip_name_from_messages,
 )
-from litellm.llms.xai.common_utils import XAIModelInfo, xai_reported_cost_in_usd
+from litellm.llms.xai.common_utils import (
+    XAIModelInfo,
+    omit_tool_choice_without_tools,
+    xai_oauth_token_file,
+    xai_reported_cost_in_usd,
+)
 from litellm.llms.xai.cost_calculator import (
     apply_server_side_tool_usage_details_to_usage,
 )
@@ -81,7 +86,8 @@ class XAIChatConfig(OpenAIGPTConfig):
         dynamic_api_key: Final = XAIModelInfo.get_api_key(api_key)
         if should_use_xai_oauth(litellm_params) and not dynamic_api_key:
             try:
-                headers["Authorization"] = f"Bearer {XAIOAuthAuthenticator().get_access_token()}"
+                token_file: Final = xai_oauth_token_file(litellm_params)  # pyright: ignore[reportUnknownArgumentType]  # litellm_params arrives untyped from the provider config
+                headers["Authorization"] = f"Bearer {XAIOAuthAuthenticator(auth_file=token_file).get_access_token()}"
             except XAIOAuthError as exc:
                 raise AuthenticationError(
                     model=model,
@@ -115,7 +121,9 @@ class XAIChatConfig(OpenAIGPTConfig):
 
         dynamic_api_key: Final = XAIModelInfo.get_api_key(api_key)
         if should_use_xai_oauth(litellm_params) and not dynamic_api_key:
-            api_base = XAIOAuthAuthenticator().get_api_base()
+            api_base = XAIOAuthAuthenticator(
+                auth_file=xai_oauth_token_file(litellm_params)  # pyright: ignore[reportUnknownArgumentType]  # litellm_params arrives untyped from the provider config
+            ).get_api_base()
 
         return super().get_complete_url(
             api_base=api_base,
@@ -134,7 +142,6 @@ class XAIChatConfig(OpenAIGPTConfig):
             "max_tokens",
             "n",
             "parallel_tool_calls",
-            "presence_penalty",
             "response_format",
             "seed",
             "stream",
@@ -147,6 +154,12 @@ class XAIChatConfig(OpenAIGPTConfig):
             "user",
             "web_search_options",
         ]
+        #########################################################
+        # presence penalty check
+        # grok-4+ does not support presence_penalty (confirmed via API errors)
+        #########################################################
+        if not self._is_grok_4_plus(model):
+            base_openai_params.append("presence_penalty")
         # for some reason, grok-3-mini does not support stop tokens
         #########################################################
         # stop tokens check
@@ -194,6 +207,10 @@ class XAIChatConfig(OpenAIGPTConfig):
             return False
         return True
 
+    def _is_grok_4_plus(self, model: str) -> bool:
+        """Check if model is grok-4 or newer (grok-4.x, grok-4.5, etc.)."""
+        return "grok-4" in model or "grok-build" in model
+
     def map_openai_params(
         self,
         non_default_params: dict,
@@ -219,7 +236,7 @@ class XAIChatConfig(OpenAIGPTConfig):
             elif param in supported_openai_params:
                 if value is not None:
                     optional_params[param] = value
-        return optional_params
+        return omit_tool_choice_without_tools(optional_params)  # pyright: ignore[reportUnknownArgumentType]  # optional_params is the untyped provider param dict
 
     def get_model_response_iterator(
         self,

@@ -2,9 +2,11 @@ from collections.abc import Iterable, Mapping
 from typing import Final
 
 import httpx
-from pydantic import ConfigDict, TypeAdapter
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 import litellm
+from litellm.constants import XAI_API_BASE
+from litellm.exceptions import AuthenticationError
 from litellm.litellm_core_utils.url_utils import join_api_base
 from litellm.llms.base_llm.base_utils import BaseLLMModelInfo
 from litellm.secret_managers.main import get_secret_str
@@ -24,6 +26,86 @@ def xai_reported_cost_in_usd(cost_in_usd_ticks: object) -> float | None:
     if cost_in_usd_ticks < 0:
         return None
     return cost_in_usd_ticks / USD_TICKS_PER_DOLLAR
+
+
+_TOOL_FIELDS_WITHOUT_TOOLS: Final = frozenset({"tool_choice", "parallel_tool_calls", "tools"})
+
+
+def omit_tool_choice_without_tools(
+    params: Mapping[str, object],
+) -> dict[str, object]:  # mutable-ok: provider request params
+    """Drop tool fields when the request carries no tools, since xAI rejects a tool_choice without tools."""
+    if params.get("tools"):
+        return dict(params)
+    return {key: value for key, value in params.items() if key not in _TOOL_FIELDS_WITHOUT_TOOLS}
+
+
+def xai_as_mapping(value: object) -> Mapping[str, object] | None:
+    """Read a provider payload as a string-keyed mapping, or None when it is not one."""
+    try:
+        return _JSON_OBJECT.validate_python(value)
+    except ValidationError:
+        return None
+
+
+def xai_optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def xai_oauth_token_file(litellm_params: Mapping[str, object] | None) -> str | None:
+    return xai_optional_str((litellm_params or {}).get("xai_oauth_token_file"))
+
+
+def xai_uses_oauth(litellm_params: Mapping[str, object] | None, api_key: str | None) -> bool:
+    from litellm.llms.xai.oauth import should_use_xai_oauth
+
+    return should_use_xai_oauth(litellm_params) and not XAIModelInfo.get_api_key(api_key)
+
+
+def xai_api_root(api_base: str | None, api_key: str | None, litellm_params: Mapping[str, object] | None) -> str:
+    """OAuth deployments resolve their own base, API-key deployments use the configured one."""
+    from litellm.llms.xai.oauth import XAIOAuthAuthenticator
+
+    if xai_uses_oauth(litellm_params, api_key):
+        return XAIOAuthAuthenticator(auth_file=xai_oauth_token_file(litellm_params)).get_api_base()
+    return api_base or get_secret_str("XAI_API_BASE") or get_secret_str("XAI_OAUTH_API_BASE") or XAI_API_BASE
+
+
+def xai_authorization(
+    model: str,
+    api_key: str | None,
+    litellm_params: Mapping[str, object] | None,
+    purpose: str,
+) -> str:
+    """Bearer value for xAI, from the OAuth token when configured and the API key otherwise."""
+    from litellm.llms.xai.oauth import XAIOAuthAuthenticator, XAIOAuthError
+
+    dynamic_api_key: Final = XAIModelInfo.get_api_key(api_key)
+    if not xai_uses_oauth(litellm_params, api_key):
+        if not dynamic_api_key:
+            raise AuthenticationError(
+                model=model,
+                llm_provider="xai",
+                message=(
+                    f"Missing xAI credentials for {purpose}. Pass api_key / XAI_API_KEY, or set use_xai_oauth=True."
+                ),
+            )
+        return f"Bearer {dynamic_api_key}"
+
+    try:
+        return f"Bearer {XAIOAuthAuthenticator(auth_file=xai_oauth_token_file(litellm_params)).get_access_token()}"
+    except XAIOAuthError as exc:
+        raise AuthenticationError(model=model, llm_provider="xai", message=str(exc)) from exc
+
+
+def xai_json_headers(
+    headers: Mapping[str, str], authorization: str
+) -> dict[str, str]:  # mutable-ok: HTTP header dict the request layer consumes
+    """Base headers plus the bearer token, defaulting the JSON content type."""
+    content_type: Final = (
+        {} if "content-type" in headers or "Content-Type" in headers else {"Content-Type": "application/json"}
+    )
+    return {**headers, "Authorization": authorization, **content_type}
 
 
 class XAIModelInfo(BaseLLMModelInfo):

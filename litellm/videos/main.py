@@ -1,11 +1,12 @@
 import asyncio
 import contextvars
 import json
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Mapping
 from functools import partial
 from typing import Final, Literal, overload
 
 from httpx._types import FileContent
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 import litellm
 from litellm.constants import DEFAULT_VIDEO_ENDPOINT_MODEL
@@ -30,6 +31,67 @@ from litellm.videos.utils import VideoGenerationRequestUtils
 llm_http_handler: BaseLLMHTTPHandler = BaseLLMHTTPHandler()
 
 
+_ENTRY: Final = TypeAdapter(Mapping[str, object], config=ConfigDict(hide_input_in_errors=True))
+
+
+def _catalog_entry(model: str) -> Mapping[str, object] | None:
+    raw: Final[object] = litellm.model_cost.get(model)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]  # the catalog has no declared value type
+    try:
+        return _ENTRY.validate_python(raw)
+    except ValidationError:
+        return None
+
+
+def _provider_from_prefix(model: str) -> str | None:
+    try:
+        _, provider, _, _ = get_llm_provider(model=model)
+    except Exception:  # noqa: BLE001 # get_llm_provider raises Exception and BadRequestError
+        return None
+    return provider
+
+
+def _catalog_provider(key: str) -> str | None:
+    entry: Final = _catalog_entry(key)
+    if entry is None:
+        return None
+    provider: Final = entry.get("litellm_provider")
+    return provider if isinstance(provider, str) and provider else None
+
+
+def _custom_llm_provider_from_model(model: str) -> str | None:
+    if "/" in model:
+        prefixed: Final = _provider_from_prefix(model)
+        if prefixed:
+            return prefixed
+    catalog: Final = next(
+        (provider for provider in (_catalog_provider(key) for key in (model, f"xai/{model}")) if provider),
+        None,
+    )
+    if catalog:
+        return catalog
+    if model.startswith("grok-imagine-video"):
+        return "xai"
+    return None
+
+
+def _provider_for_video_id(
+    video_id: str,
+    custom_llm_provider: str | None,
+    model: object | None = None,
+) -> str:
+    if custom_llm_provider is not None:
+        return custom_llm_provider
+    decoded: Final = decode_video_id_with_provider(video_id)
+    from_id: Final = decoded.get("custom_llm_provider")
+    if from_id:
+        return from_id
+    if isinstance(model, str) and model:
+        from_model: Final = _custom_llm_provider_from_model(model)
+        if from_model:
+            return from_model
+    return "openai"
+
+
 ##### Video Generation #######################
 @client
 async def avideo_generation(
@@ -40,7 +102,7 @@ async def avideo_generation(
     size: str | None = None,
     user: str | None = None,
     timeout=600,  # default to 10 minutes
-    custom_llm_provider=None,
+    custom_llm_provider: str | None = None,
     # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
     # The extra values given here take precedence over values defined on the client or passed to this method.
     extra_headers: dict[str, object] | None = None,
@@ -170,7 +232,7 @@ def video_generation(
     size: str | None = None,
     user: str | None = None,
     timeout=600,  # default to 10 minutes
-    custom_llm_provider=None,
+    custom_llm_provider: str | None = None,
     # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
     # The extra values given here take precedence over values defined on the client or passed to this method.
     extra_headers: dict[str, object] | None = None,
@@ -318,10 +380,13 @@ def video_content(
         litellm_call_id: Final[str | None] = kwargs.get("litellm_call_id", None)
         _is_async: Final = kwargs.pop("async_call", False) is True
 
-        # Try to decode provider from video_id if not explicitly provided
-        if custom_llm_provider is None:
-            decoded: Final = decode_video_id_with_provider(video_id)
-            custom_llm_provider = decoded.get("custom_llm_provider") or "openai"
+        custom_llm_provider = (  # rebind-ok: the resolved provider replaces the optional caller argument
+            _provider_for_video_id(
+                video_id,
+                custom_llm_provider,
+                kwargs.get("model"),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # video entrypoints take **kwargs untyped
+            )
+        )
 
         # get llm provider logic
         litellm_params: Final = GenericLiteLLMParams(**kwargs)
@@ -413,10 +478,13 @@ async def avideo_content(
         loop: Final = asyncio.get_event_loop()
         kwargs["async_call"] = True
 
-        # Try to decode provider from video_id if not explicitly provided
-        if custom_llm_provider is None:
-            decoded: Final = decode_video_id_with_provider(video_id)
-            custom_llm_provider = decoded.get("custom_llm_provider") or "openai"
+        custom_llm_provider = (  # rebind-ok: the resolved provider replaces the optional caller argument
+            _provider_for_video_id(
+                video_id,
+                custom_llm_provider,
+                kwargs.get("model"),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # video entrypoints take **kwargs untyped
+            )
+        )
 
         func: Final = partial(
             video_content,
@@ -456,7 +524,7 @@ async def avideo_remix(
     video_id: str,
     prompt: str,
     timeout=600,  # default to 10 minutes
-    custom_llm_provider=None,
+    custom_llm_provider: str | None = None,
     # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
     # The extra values given here take precedence over values defined on the client or passed to this method.
     extra_headers: dict[str, object] | None = None,
@@ -559,7 +627,7 @@ def video_remix(
     video_id: str,
     prompt: str,
     timeout=600,  # default to 10 minutes
-    custom_llm_provider=None,
+    custom_llm_provider: str | None = None,
     # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
     # The extra values given here take precedence over values defined on the client or passed to this method.
     extra_headers: dict[str, object] | None = None,
@@ -660,7 +728,7 @@ async def avideo_list(
     order: str | None = None,
     api_key: str | None = None,
     timeout=600,  # default to 10 minutes
-    custom_llm_provider=None,
+    custom_llm_provider: str | None = None,
     # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
     # The extra values given here take precedence over values defined on the client or passed to this method.
     extra_headers: dict[str, object] | None = None,
@@ -774,7 +842,7 @@ def video_list(
     limit: int | None = None,
     order: str | None = None,
     timeout=600,  # default to 10 minutes
-    custom_llm_provider=None,
+    custom_llm_provider: str | None = None,
     # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
     # The extra values given here take precedence over values defined on the client or passed to this method.
     extra_headers: dict[str, object] | None = None,
@@ -871,7 +939,7 @@ def video_list(
 async def avideo_status(
     video_id: str,
     timeout=600,  # default to 10 minutes
-    custom_llm_provider=None,
+    custom_llm_provider: str | None = None,
     # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
     # The extra values given here take precedence over values defined on the client or passed to this method.
     extra_headers: dict[str, object] | None = None,
@@ -970,7 +1038,7 @@ def video_status(
 def video_status(
     video_id: str,
     timeout=600,  # default to 10 minutes
-    custom_llm_provider=None,
+    custom_llm_provider: str | None = None,
     # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
     # The extra values given here take precedence over values defined on the client or passed to this method.
     extra_headers: dict[str, object] | None = None,
@@ -1020,10 +1088,13 @@ def video_status(
             response: Final = VideoObject(**mock_response)
             return response
 
-        # Try to decode provider from video_id if not explicitly provided
-        if custom_llm_provider is None:
-            decoded: Final = decode_video_id_with_provider(video_id)
-            custom_llm_provider = decoded.get("custom_llm_provider") or "openai"
+        custom_llm_provider = (  # rebind-ok: the resolved provider replaces the optional caller argument
+            _provider_for_video_id(
+                video_id,
+                custom_llm_provider,
+                kwargs.get("model"),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # video entrypoints take **kwargs untyped
+            )
+        )
 
         # get llm provider logic
         litellm_params: Final = GenericLiteLLMParams(**kwargs)

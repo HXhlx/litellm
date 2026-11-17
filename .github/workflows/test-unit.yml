@@ -416,6 +416,7 @@ jobs:
           - shard: router
             test-path: >-
               tests/unit/test_router
+              tests/unit/protocol_routing
             python-version: "3.12"
             workers: 4
             reruns: 0

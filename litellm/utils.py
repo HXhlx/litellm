@@ -317,6 +317,10 @@ TextCompletionResponse: TypeAlias = _TextCompletionResponse
 TextCompletionStreamWrapper: TypeAlias = _TextCompletionStreamWrapper
 
 from litellm import utils as litellm_utils
+from litellm.litellm_core_utils.thinking_param_translation import (
+    apply_thinking_param_translation,
+    extra_body_mapping,
+)
 
 # These are lazy loaded via __getattr__
 from litellm.llms.base_llm.base_utils import (
@@ -5264,6 +5268,41 @@ def pre_process_optional_params(passed_params: dict, non_default_params: dict, c
     return optional_params
 
 
+def _apply_model_info_thinking_translation(
+    *,
+    model_info: Mapping[str, object] | None,
+    passed_params: dict[str, object],  # mutable-ok: get_optional_params owns these request dicts
+    non_default_params: dict[str, object],  # mutable-ok: get_optional_params owns these request dicts
+) -> None:
+    prior_thinking: Final = non_default_params.get("thinking", passed_params.get("thinking"))
+    prior_effort: Final = non_default_params.get("reasoning_effort", passed_params.get("reasoning_effort"))
+    existing_extra: Final = extra_body_mapping(passed_params.get("extra_body"))
+    translated: Final = apply_thinking_param_translation(
+        model_info=model_info,
+        thinking=prior_thinking,
+        reasoning_effort=prior_effort,
+        existing_extra_body=existing_extra,
+    )
+    if (
+        translated.thinking is prior_thinking
+        and translated.reasoning_effort is prior_effort
+        and translated.extra_body == existing_extra
+    ):
+        return
+
+    for target in (non_default_params, passed_params):
+        if translated.thinking is None:
+            target.pop("thinking", None)
+        else:
+            target["thinking"] = translated.thinking
+        if translated.reasoning_effort is None:
+            target.pop("reasoning_effort", None)
+        else:
+            target["reasoning_effort"] = translated.reasoning_effort
+    if translated.extra_body:
+        passed_params["extra_body"] = dict(translated.extra_body)  # rebind-ok: writes back into the caller's dict
+
+
 def _declared_reasoning_efforts(model_info: Mapping[str, object] | None) -> tuple[str, ...]:
     from litellm.litellm_core_utils.reasoning_effort_capability import deployment_reasoning_effort_levels
 
@@ -5373,13 +5412,18 @@ def get_optional_params(
             provider=LlmProviders(custom_llm_provider),
             base_model=base_model,
         )
-    non_default_params: Final = pre_process_non_default_params(
+    non_default_params: Final[dict[str, object]] = pre_process_non_default_params(  # mutable-ok: mutated in place
         passed_params=passed_params,
         special_params=special_params,
         custom_llm_provider=custom_llm_provider,
         additional_drop_params=additional_drop_params,
         model=model,
         provider_config=provider_config,
+    )
+    _apply_model_info_thinking_translation(
+        model_info=model_info,
+        passed_params=passed_params,
+        non_default_params=non_default_params,
     )
     optional_params = pre_process_optional_params(
         passed_params=passed_params,
@@ -10909,6 +10953,12 @@ class ProviderConfigManager:
             )
 
             return get_dashscope_family_image_generation_config(provider.value)
+        elif LlmProviders.XAI == provider:
+            from litellm.llms.xai.image_generation import (
+                get_xai_image_generation_config,
+            )
+
+            return get_xai_image_generation_config(model)
         elif LlmProviders.MODELSCOPE == provider:
             from litellm.llms.modelscope.image_generation import (
                 get_modelscope_image_generation_config,
@@ -10975,6 +11025,10 @@ class ProviderConfigManager:
             return MinimaxVideoConfig()
         elif LlmProviders.EDENAI == provider:
             return litellm.EdenAIVideoConfig()
+        elif LlmProviders.XAI == provider:
+            from litellm.llms.xai.videos.transformation import XAIVideoConfig
+
+            return XAIVideoConfig()
         elif LlmProviders.VOLCENGINE == provider:
             from litellm.llms.volcengine.videos.transformation import VolcEngineVideoConfig
 
@@ -11130,6 +11184,10 @@ class ProviderConfigManager:
             )
 
             return get_openrouter_image_edit_config(model)
+        elif LlmProviders.XAI == provider:
+            from litellm.llms.xai.image_edit.transformation import XAIImageEditConfig
+
+            return XAIImageEditConfig()
         elif LlmProviders.TENCENT == provider:
             from litellm.llms.tencent.image_edit.transformation import (
                 TencentImageEditConfig,

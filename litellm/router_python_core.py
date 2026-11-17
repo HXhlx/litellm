@@ -11473,7 +11473,15 @@ class PythonCore(DeprecatedRouterMembers):
             mi_dict: dict[str, Any] = d.get("model_info") or {}
             prefs_raw = mi_dict.get("adaptive_router_preferences")
             if prefs_raw is not None:
-                model_to_prefs[name] = AdaptiveRouterPreferences(**prefs_raw)
+                try:
+                    model_to_prefs[name] = AdaptiveRouterPreferences(**prefs_raw)
+                except Exception as exc:  # noqa: BLE001  # adaptive_router_preferences is admin-supplied model_info and can be any shape
+                    verbose_router_logger.warning(
+                        "AdaptiveRouter[%s]: invalid adaptive_router_preferences for model %s, using defaults: %s",
+                        d["model_name"],
+                        name,
+                        exc,
+                    )
 
             # model_info is the conventional pricing location elsewhere in LiteLLM; litellm_params wins if set.
             cost = d.get("litellm_params", {}).get("input_cost_per_token")
@@ -11866,6 +11874,15 @@ class PythonCore(DeprecatedRouterMembers):
         self._add_model_to_list_and_index_map(model=_deployment, model_id=served.model_info.id)
         self._core_model_names.add(served.model_name)
         self._sync_deployment_budget_config(deployment=served)
+
+        # Adaptive-router init is deferred because it needs visibility into
+        # all deployments in available_models. This call handles the case where
+        # downstream models are already loaded (e.g. Management API add).
+        # During startup, the proxy's _add_deployment() calls finalize after
+        # all DB models are loaded, so this is a safe no-op in that path.
+        if self._is_adaptive_router_deployment(litellm_params=served.litellm_params):
+            self._finalize_adaptive_router_if_configured()
+
         return served
 
     def _update_deployment_indices_after_removal(self, model_id: str, removal_idx: int) -> None:
@@ -15662,6 +15679,14 @@ class PythonCore(DeprecatedRouterMembers):
         - Dict, if specific model chosen
         """
 
+        # Strip the proxy-internal protocol marker FIRST, before any early
+        # return. Model-id lookups (has_model_id) and specific_deployment=True
+        # return a single dict before the protocol filter below runs; popping
+        # here guarantees the marker never reaches provider calls via
+        # input_kwargs on any path.
+        route_marker: Final = request_kwargs.pop("_route_type", None)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]  # request_kwargs is the untyped proxy request dict
+        _route_type: Final = route_marker if isinstance(route_marker, str) else None
+
         model, healthy_deployments = self._common_checks_available_deployment(
             model=model,
             messages=messages,
@@ -15748,6 +15773,18 @@ class PythonCore(DeprecatedRouterMembers):
             healthy_deployments = _pre_cooldown_deployments
 
         healthy_deployments = self._filter_blocked_deployments(healthy_deployments)
+
+        # Protocol strict-mode filter (opt-in). In bridged mode this is a no-op.
+        from litellm.protocol_routing import filter_deployments_by_protocol
+
+        if _route_type is not None:
+            healthy_deployments = filter_deployments_by_protocol(  # rebind-ok: the protocol filter narrows the deployment list
+                healthy_deployments=cast(  # cast-ok: the legacy selector returns dicts whose values are only partially typed
+                    list[dict[str, object]], healthy_deployments
+                ),
+                route_type=_route_type,
+                model=model,
+            )
 
         healthy_deployments = await self.async_callback_filter_deployments(
             model=model,
@@ -16953,6 +16990,13 @@ class PythonCore(DeprecatedRouterMembers):
         """
         Returns the deployment based on routing strategy
         """
+        # The sync path has no protocol filter, but the proxy may still pass
+        # the internal _route_type marker in request_kwargs. Pop it here so it
+        # never leaks into provider calls via input_kwargs. Mirrors the pop at
+        # the top of async_get_healthy_deployments.
+        if request_kwargs is not None and "_route_type" in request_kwargs:
+            del request_kwargs["_route_type"]  # rebind-ok: marker must not reach provider kwargs
+
         if self._core_routing_plugins:
             raise ValueError(
                 "Router(plugins=[...]) is configured, but this call resolved to the synchronous "

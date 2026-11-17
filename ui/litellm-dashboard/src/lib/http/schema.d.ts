@@ -36126,6 +36126,11 @@ export interface components {
             vertex_project?: string | null;
             /** Watsonx Region Name */
             watsonx_region_name?: string | null;
+            /**
+             * Xai Oauth Token File
+             * @description Per-deployment xAI OAuth token file path. When set with use_xai_oauth=True, the request reads that account's OAuth credentials instead of the global token file, enabling multi-account SuperGrok routing.
+             */
+            xai_oauth_token_file?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -51710,6 +51715,11 @@ export interface components {
             vertex_project?: string | null;
             /** Watsonx Region Name */
             watsonx_region_name?: string | null;
+            /**
+             * Xai Oauth Token File
+             * @description Per-deployment xAI OAuth token file path. When set with use_xai_oauth=True, the request reads that account's OAuth credentials instead of the global token file, enabling multi-account SuperGrok routing.
+             */
+            xai_oauth_token_file?: string | null;
         } & {
             [key: string]: unknown;
         };

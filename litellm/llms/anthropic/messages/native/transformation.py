@@ -1,3 +1,4 @@
+import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import ClassVar, Final
 
@@ -863,6 +864,7 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         - output_format: adds 'structured-outputs-2025-11-13'
         - speed: adds 'fast-mode-2026-02-01'
         - a message carrying output_config: adds 'per-turn-control-2026-07-01'
+        - a model name ending in [1m]: adds 'context-1m-2025-08-07'
 
         Args:
             headers: Request headers dict
@@ -882,6 +884,9 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             if piece.strip()
         )
         beta_values.update(existing_beta)
+
+        if re.search(r"\[1m\]$", str(optional_params.get("_original_model", ""))):  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # optional_params is the untyped provider param dict
+            beta_values.add("context-1m-2025-08-07")
 
         if requires_native_compaction_beta(custom_llm_provider, optional_params, messages):
             beta_values.add(ANTHROPIC_BETA_HEADER_VALUES.COMPACT_2026_09_04.value)

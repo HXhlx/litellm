@@ -1,9 +1,10 @@
 from collections.abc import Mapping
+from itertools import chain
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple, TypeAlias
 
 import httpx
-from pydantic import TypeAdapter
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 import litellm
 from litellm._logging import verbose_logger
@@ -15,7 +16,13 @@ from litellm.llms.base_llm.responses.transformation import (
     ReasoningFieldValues,
 )
 from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
-from litellm.llms.xai.common_utils import XAIModelInfo, xai_reported_cost_in_usd
+from litellm.llms.xai.common_utils import (
+    XAIModelInfo,
+    omit_tool_choice_without_tools,
+    xai_as_mapping,
+    xai_oauth_token_file,
+    xai_reported_cost_in_usd,
+)
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import (
     ResponseAPIUsage,
@@ -48,17 +55,99 @@ def _usage_restated_from_xai_ticks(usage: ResponseAPIUsage | None) -> ResponseAP
     return usage.model_copy(update=MappingProxyType({"cost": reported_cost}))
 
 
+_NAMESPACE_TOOL_TYPE: Final = "namespace"
+_NAMESPACE_SEPARATOR: Final = "__"
+
+# qualified name -> (namespace, tool name as the client declared it)
+InlinedToolNames: TypeAlias = Mapping[str, tuple[str, str]]
+
+_TOOL_SEQUENCE: Final = TypeAdapter(tuple[object, ...], config=ConfigDict(hide_input_in_errors=True))
+
+
+class _InlinedTools(NamedTuple):
+    tools: tuple[object, ...]
+    names: InlinedToolNames
+
+
+def _qualified(namespace: str, name: str) -> str:
+    return f"{namespace}{_NAMESPACE_SEPARATOR}{name}"
+
+
+def _is_tool_group(value: object) -> bool:
+    return isinstance(value, list)
+
+
+def _as_tool_sequence(tools: object) -> tuple[object, ...]:
+    try:
+        return _TOOL_SEQUENCE.validate_python(tools)
+    except ValidationError:
+        return (tools,)
+
+
+def _rename_member(member: object, namespace: str) -> tuple[object, tuple[str, tuple[str, str]] | None]:
+    payload: Final = xai_as_mapping(member)
+    if payload is None:
+        return member, None
+    name: Final = payload.get("name")
+    if not isinstance(name, str):
+        return member, None
+    qualified: Final = _qualified(namespace, name)
+    return {**payload, "name": qualified}, (qualified, (namespace, name))
+
+
+def _expand_namespace_tool(tool: object) -> tuple[tuple[object, ...], tuple[tuple[str, tuple[str, str]], ...]]:
+    """One inbound tool -> (tools to send, qualified-name back-references).
+
+    A `namespace` group contributes its members under `<namespace>__<tool>`, the
+    qualified name Codex itself uses for MCP tools when they are not namespaced,
+    which keeps names unique across groups. Anything else passes through.
+    """
+    payload: Final = xai_as_mapping(tool)
+    if payload is None or payload.get("type") != _NAMESPACE_TOOL_TYPE:
+        return (tool,), ()
+
+    namespace: Final = payload.get("name")
+    members: Final = payload.get("tools")
+    if not isinstance(namespace, str) or not namespace or not _is_tool_group(members):
+        return (tool,), ()
+
+    renamed: Final = tuple(_rename_member(member, namespace) for member in _as_tool_sequence(members))
+    return tuple(out for out, _ in renamed), tuple(ref for _, ref in renamed if ref is not None)
+
+
+def _inline_namespace_tools(tools: object) -> _InlinedTools:
+    """Replace `namespace` tool groups with their member tools.
+
+    xAI rejects `namespace` as a tool type, and Codex wraps every MCP server's
+    tools plus its sub-agent tools in one, so a single group fails the whole
+    request. The returned mapping lets the response side hand Codex back the
+    `(namespace, name)` pair it declared the tool under.
+    """
+    expanded: Final = tuple(_expand_namespace_tool(tool) for tool in _as_tool_sequence(tools))
+    return _InlinedTools(
+        tools=tuple(chain.from_iterable(members for members, _ in expanded)),
+        names=MappingProxyType(dict(chain.from_iterable(pairs for _, pairs in expanded))),
+    )
+
+
 class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
     """
     Configuration for XAI's Responses API.
 
     Inherits from OpenAIResponsesAPIConfig since XAI's Responses API is largely
     compatible with OpenAI's, with a few differences:
+    - Has no `namespace` tool type, so Codex tool groups are inlined
     - Requires code_interpreter tools to have 'container' field removed
     - Recommends store=false when sending images
 
     Reference: https://docs.x.ai/docs/api-reference#create-new-response
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Set per request in map_openai_params; the config instance is built per
+        # call by ProviderConfigManager, so this never spans two requests.
+        self._inlined_tool_names: InlinedToolNames = MappingProxyType({})
 
     @property
     def custom_llm_provider(self) -> LlmProviders:
@@ -138,6 +227,24 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
 
         return xai_tool
 
+    def _transform_tool(self, tool: object) -> object:
+        payload: Final = xai_as_mapping(tool)
+        if payload is None:
+            return tool
+
+        tool_type: Final = payload.get("type")
+        if tool_type == "code_interpreter":
+            # XAI supports code_interpreter but doesn't use the container field
+            verbose_logger.debug("XAI: Transforming code_interpreter tool, removing container field")
+            return {"type": "code_interpreter"}
+        if tool_type == "web_search":
+            verbose_logger.debug("XAI: Transforming web_search tool to XAI format")
+            return self._transform_web_search_tool(payload)
+        if tool_type == "x_search":
+            verbose_logger.debug("XAI: Transforming x_search tool to XAI format")
+            return self._transform_x_search_tool(payload)
+        return tool
+
     def map_openai_params(
         self,
         response_api_optional_params: ResponsesAPIOptionalRequestParams,
@@ -148,10 +255,10 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
         Map parameters for XAI Responses API.
 
         Handles XAI-specific transformations:
-        1. Transforms code_interpreter tools to remove 'container' field
-        2. Transforms web_search tools to XAI format (removes search_context_size, adds filters)
-        3. Transforms x_search tools to XAI format
-        4. Sets store=false when images are detected (recommended by XAI)
+        1. Inlines `namespace` tool groups into qualified function tools
+        2. Transforms code_interpreter tools to remove 'container' field
+        3. Transforms web_search tools to XAI format (removes search_context_size, adds filters)
+        4. Transforms x_search tools to XAI format
         """
         params: Final = dict(response_api_optional_params)
 
@@ -159,42 +266,82 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
             verbose_logger.debug("XAI Responses API does not support 'metadata' parameter. Dropping it.")
             params.pop("metadata")
 
-        # Transform tools
-        if "tools" in params and params["tools"]:
-            tools_list = params["tools"]
-            # Ensure tools is a list for iteration
-            if not isinstance(tools_list, list):
-                tools_list = [tools_list]
+        # Transform tools: inline `namespace` groups first, then per-type transforms
+        if params.get("tools"):
+            inlined: Final = _inline_namespace_tools(params["tools"])
+            self._inlined_tool_names = inlined.names
+            params["tools"] = [self._transform_tool(tool) for tool in inlined.tools]
 
-            transformed_tools: Final[list[object]] = []
-            for tool in tools_list:
-                if isinstance(tool, dict):
-                    tool_type = tool.get("type")
+        return omit_tool_choice_without_tools(params)
 
-                    if tool_type == "code_interpreter":
-                        # XAI supports code_interpreter but doesn't use the container field
-                        verbose_logger.debug("XAI: Transforming code_interpreter tool, removing container field")
-                        transformed_tools.append({"type": "code_interpreter"})
+    def _restore_dict_item(self, item: Mapping[str, object]) -> Mapping[str, object]:
+        name: Final = item.get("name")
+        target: Final = self._inlined_tool_names.get(name) if isinstance(name, str) else None
+        if target is None:
+            return item
 
-                    elif tool_type == "web_search":
-                        # Transform web_search to XAI format
-                        verbose_logger.debug("XAI: Transforming web_search tool to XAI format")
-                        transformed_tools.append(self._transform_web_search_tool(tool))
+        namespace, restored = target
+        return {**item, "name": restored, "namespace": namespace}
 
-                    elif tool_type == "x_search":
-                        # Transform x_search to XAI format
-                        verbose_logger.debug("XAI: Transforming x_search tool to XAI format")
-                        transformed_tools.append(self._transform_x_search_tool(tool))
+    def _restore_any_item(self, item: object) -> object:
+        """Give a tool call back the `(namespace, name)` pair the client declared.
 
-                    else:
-                        # Keep other tools as-is
-                        transformed_tools.append(tool)
-                else:
-                    transformed_tools.append(tool)
+        Codex registers a namespaced tool under that pair and its router rejects
+        the qualified name we had to send xAI, so the split has to be undone on
+        the way back. Items are pydantic models on the non-streaming path and
+        plain dicts inside streaming chunks.
+        """
+        payload: Final = xai_as_mapping(item)
+        if payload is not None:
+            return self._restore_dict_item(payload)
 
-            params["tools"] = transformed_tools
+        name: Final = getattr(item, "name", None)  # pyright: ignore[reportAny]  # output items are pydantic models with no shared name field
+        target: Final = self._inlined_tool_names.get(name) if isinstance(name, str) else None
+        if target is None:
+            return item
 
-        return params
+        namespace, restored = target
+        item.name = restored  # rebind-ok: the output item is the object being restored  # pyright: ignore[reportAttributeAccessIssue]  # the pydantic union has no shared declaration
+        item.namespace = namespace  # rebind-ok: ditto, xAI hands the pair back on the way out  # pyright: ignore[reportAttributeAccessIssue]  # ditto
+        return item
+
+    def _restore_chunk_tool_calls(
+        self, chunk: Mapping[str, object]
+    ) -> dict[str, object]:  # mutable-ok: streaming chunk dict handed back to the caller
+        if not self._inlined_tool_names:
+            return dict(chunk)
+
+        patched: Final = dict(chunk)
+        if patched.get("item") is not None:
+            patched["item"] = self._restore_any_item(patched["item"])
+
+        response: Final = xai_as_mapping(patched.get("response"))
+        output: Final = response.get("output") if response is not None else None
+        if response is not None and _is_tool_group(output):
+            patched["response"] = {
+                **response,
+                "output": [self._restore_any_item(entry) for entry in _as_tool_sequence(output)],
+            }
+        return patched
+
+    def _oauth_token(self, model: str, litellm_params: GenericLiteLLMParams) -> str | None:
+        """OAuth bearer token for deployments configured with use_xai_oauth."""
+        from litellm.llms.xai.oauth import (
+            XAIOAuthAuthenticator,
+            XAIOAuthError,
+            should_use_xai_oauth,
+        )
+
+        if not should_use_xai_oauth(litellm_params.model_dump()):
+            return None
+        try:
+            return XAIOAuthAuthenticator(auth_file=litellm_params.xai_oauth_token_file).get_access_token()
+        except XAIOAuthError as exc:
+            raise AuthenticationError(
+                model=model,
+                llm_provider=self.custom_llm_provider.value,
+                message=str(exc),
+            ) from exc
 
     def validate_environment(self, headers: dict, model: str, litellm_params: GenericLiteLLMParams | None) -> dict:
         """
@@ -202,25 +349,11 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
 
         Uses the shared xAI key resolver with Responses API legacy precedence.
         """
-        litellm_params = litellm_params or GenericLiteLLMParams()
-        api_key = XAIModelInfo.get_api_key(litellm_params.api_key, legacy_generic_before_env=True)
-
-        if not api_key:
-            from litellm.llms.xai.oauth import (
-                XAIOAuthAuthenticator,
-                XAIOAuthError,
-                should_use_xai_oauth,
-            )
-
-            if should_use_xai_oauth(litellm_params.model_dump()):
-                try:
-                    api_key = XAIOAuthAuthenticator().get_access_token()
-                except XAIOAuthError as exc:
-                    raise AuthenticationError(
-                        model=model,
-                        llm_provider=self.custom_llm_provider.value,
-                        message=str(exc),
-                    ) from exc
+        params: Final = litellm_params or GenericLiteLLMParams()
+        api_key: Final = XAIModelInfo.get_api_key(params.api_key, legacy_generic_before_env=True) or self._oauth_token(
+            model=model,
+            litellm_params=params,
+        )
 
         if not api_key:
             raise ValueError(
@@ -250,7 +383,8 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
 
         api_key: Final = XAIModelInfo.get_api_key(litellm_params.get("api_key"), legacy_generic_before_env=True)
         if should_use_xai_oauth(litellm_params) and not api_key:
-            api_base = XAIOAuthAuthenticator().get_api_base()
+            token_file: Final = xai_oauth_token_file(litellm_params)  # pyright: ignore[reportUnknownArgumentType]  # litellm_params arrives untyped from the provider config
+            api_base = XAIOAuthAuthenticator(auth_file=token_file).get_api_base()
         else:
             api_base = api_base or litellm.api_base or get_secret_str("XAI_API_BASE") or XAI_API_BASE
 
@@ -271,17 +405,20 @@ class XAIResponsesAPIConfig(OpenAIResponsesAPIConfig):
         restated_usage: Final = _usage_restated_from_xai_ticks(response.usage)
         if restated_usage is not None:
             response.usage = restated_usage
+        if self._inlined_tool_names:
+            restored: Final = [self._restore_any_item(item) for item in (response.output or ())]  # pyright: ignore[reportUnknownArgumentType]  # output items mix pydantic models with a bare dict member
+            response.output = restored  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]  # output is a union of list types; restored items keep their runtime type
         return response
 
     def transform_streaming_response(
         self,
         model: str,
-        parsed_chunk: dict,  # mutable-ok: overrides the base class signature
+        parsed_chunk: Mapping[str, object],
         logging_obj: LiteLLMLoggingObj,
     ) -> ResponsesAPIStreamingResponse:
         event: Final = super().transform_streaming_response(
             model=model,
-            parsed_chunk=parsed_chunk,
+            parsed_chunk=self._restore_chunk_tool_calls(parsed_chunk),
             logging_obj=logging_obj,
         )
         if not isinstance(event, (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent)):

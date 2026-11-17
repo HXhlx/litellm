@@ -45,6 +45,18 @@ IMAGE_EDIT_NUMERIC_FORM_FIELDS: Final = numeric_form_fields(get_type_hints(Image
 IMAGE_EDIT_OPTIONAL_FIELD_DEFAULTS: Final = MappingProxyType({"prompt": None, "image": None})
 
 IMAGE_ARRAY_FIELD: Final = "image[]"
+IMAGE_REFERENCE_PREFIXES: Final = ("http://", "https://", "data:image/")
+
+
+def _reject_plain_string_reference(field: str, value: object) -> None:
+    """A reference is either an upload or a fetchable URL; a bare path would be encoded as text."""
+    if isinstance(value, str) and not value.startswith(IMAGE_REFERENCE_PREFIXES):
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{field}' must be a multipart file, http(s) URL, or data:image URI.",
+        )
+
+
 MASK_ARRAY_FIELD: Final = "mask[]"
 BRACKETED_FILE_FIELDS: Final = frozenset({IMAGE_ARRAY_FIELD, MASK_ARRAY_FIELD})
 
@@ -331,12 +343,8 @@ async def image_edit_api(
     if mask_files:
         data["mask"] = mask_files
 
-    for _field in ("image", "mask"):
-        if _field in data and isinstance(data[_field], str):
-            raise HTTPException(
-                status_code=422,
-                detail=f"'{_field}' must be provided as a multipart file upload, not a string.",
-            )
+    _reject_plain_string_reference("image", data.get("image"))
+    _reject_plain_string_reference("mask", data.get("mask"))
 
     #########################################################
     # Process request

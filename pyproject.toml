@@ -378,7 +378,6 @@ override-dependencies = [
 ]
 default-groups = ["dev"]
 required-version = ">=0.10.9"
-exclude-newer = "3 days"
 
 [tool.uv.exclude-newer-package]
 # TODO: remove after 2026-10-25, once brotli 1.2.1 (CVE-2026-111497) clears the 3-day window

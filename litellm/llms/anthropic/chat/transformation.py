@@ -1657,7 +1657,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 type="adaptive",
                 display="summarized",
             )
-        elif reasoning_effort == "low":
+        if reasoning_effort == "low":
             return AnthropicThinkingParam(
                 type="enabled",
                 budget_tokens=DEFAULT_REASONING_EFFORT_LOW_THINKING_BUDGET,
@@ -2279,8 +2279,12 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             )
 
     def update_headers_with_optional_anthropic_beta(
-        self, headers: dict, optional_params: dict, messages: Sequence[object] = ()
-    ) -> dict:
+        self,
+        headers: dict[str, str],
+        optional_params: dict,
+        messages: Sequence[object] = (),
+        litellm_params: Mapping[str, object] | None = None,
+    ) -> dict[str, str]:
         """Update headers with optional anthropic beta."""
 
         # Skip adding beta headers for Vertex requests
@@ -2291,6 +2295,12 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
 
         if requires_native_compaction_beta(self._resolved_provider, optional_params, messages):
             self._ensure_beta_header(headers, ANTHROPIC_BETA_HEADER_VALUES.COMPACT_2026_09_04.value)
+
+        original_model: Final = optional_params.get("_original_model") or (  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]  # optional_params is the untyped provider param dict
+            litellm_params or {}
+        ).get("_original_model")
+        if isinstance(original_model, str) and re.search(r"\[1m\]$", original_model):
+            self._ensure_beta_header(headers, "context-1m-2025-08-07")
 
         _tools: Final = optional_params.get("tools", [])
         for tool in _tools:
@@ -2406,6 +2416,11 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             model=model,
             optional_params=optional_params,
             custom_llm_provider=self._resolved_provider,
+        )
+        self.update_headers_with_optional_anthropic_beta(  # pyright: ignore[reportUnknownMemberType]  # the beta helper takes the untyped provider param dict
+            headers=headers,  # pyright: ignore[reportUnknownArgumentType]  # headers arrives untyped from transform_request's caller
+            optional_params=optional_params,
+            litellm_params=litellm_params,  # pyright: ignore[reportUnknownArgumentType]  # litellm_params is the untyped request dict
         )
 
         # === Tool-name sanitization (single chokepoint) ===

@@ -13,7 +13,7 @@ import httpx
 
 from litellm.llms.xai.cost_calculator import cost_per_token
 from litellm.llms.xai.responses.transformation import XAIResponsesAPIConfig
-from litellm.responses.utils import ResponseAPILoggingUtils
+from litellm.responses.utils import ResponseAPILoggingUtils, ResponsesAPIRequestUtils
 from litellm.types.llms.openai import (
     ResponseAPIUsage,
     ResponseCompletedEvent,
@@ -71,6 +71,20 @@ class TestXAIResponsesAPITransformation:
         assert "tools" in supported, "tools should be supported"
         assert "temperature" in supported, "temperature should be supported"
         assert "model" in supported, "model should be supported"
+
+    def test_instructions_survives_the_optional_param_gate(self):
+        """With drop_params off, an undeclared `instructions` would 400 before egress."""
+        config = XAIResponsesAPIConfig()
+        params = ResponsesAPIOptionalRequestParams(instructions="You are Codex.")
+
+        mapped = ResponsesAPIRequestUtils.get_optional_params_responses_api(
+            model="grok-4.7",
+            responses_api_provider_config=config,
+            response_api_optional_params=params,
+            drop_params=False,
+        )
+
+        assert mapped["instructions"] == "You are Codex."
 
     def test_xai_responses_endpoint_url(self):
         """Test that get_complete_url returns correct XAI endpoint"""

@@ -11439,3 +11439,101 @@ def test_ollama_pricing_lookup_preserves_live_model_info_discovery(
     )
     assert discovered["max_input_tokens"] == 32768
     assert metadata.call_count == 1
+
+
+class TestAnthropicContext1mBetaHeader:
+    """Verify that context-1m-2025-08-07 beta header is auto-added when [1m] suffix is present."""
+
+    def test_get_anthropic_headers_with_context_1m(self):
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        config = AnthropicConfig()
+        headers = config.get_anthropic_headers(
+            api_key="sk-test", context_1m_supported=True
+        )
+        assert "context-1m-2025-08-07" in headers.get("anthropic-beta", "")
+
+    def test_get_anthropic_headers_without_context_1m(self):
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        config = AnthropicConfig()
+        headers = config.get_anthropic_headers(
+            api_key="sk-test", context_1m_supported=False
+        )
+        assert "context-1m-2025-08-07" not in headers.get("anthropic-beta", "")
+
+    def test_validate_environment_adds_context_1m_for_suffixed_model(self):
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        config = AnthropicConfig()
+        headers = config.validate_environment(
+            headers={},
+            model="deepseek-v4-flash[1m]",
+            messages=[{"role": "user", "content": "hi"}],
+            optional_params={},
+            litellm_params={},
+            api_key="sk-test",
+        )
+        assert "context-1m-2025-08-07" in headers.get("anthropic-beta", "")
+
+    def test_validate_environment_no_context_1m_without_suffix(self):
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        config = AnthropicConfig()
+        headers = config.validate_environment(
+            headers={},
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": "hi"}],
+            optional_params={},
+            litellm_params={},
+            api_key="sk-test",
+        )
+        assert "context-1m-2025-08-07" not in headers.get("anthropic-beta", "")
+
+    def test_update_headers_adds_context_1m_with_original_model(self):
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        config = AnthropicConfig()
+        headers = {}
+        headers = config.update_headers_with_optional_anthropic_beta(
+            headers=headers,
+            optional_params={"_original_model": "deepseek-v4-flash[1m]"},
+        )
+        assert "context-1m-2025-08-07" in headers.get("anthropic-beta", "")
+
+    def test_update_headers_no_context_1m_without_original_model(self):
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        config = AnthropicConfig()
+        headers = {}
+        headers = config.update_headers_with_optional_anthropic_beta(
+            headers=headers,
+            optional_params={},
+        )
+        assert "context-1m-2025-08-07" not in headers.get("anthropic-beta", "")
+
+    def test_update_headers_anthropic_beta_adds_context_1m(self):
+        from litellm.llms.anthropic.messages.native.transformation import (
+            AnthropicMessagesConfig,
+        )
+
+        config = AnthropicMessagesConfig()
+        headers = {}
+        headers = config._update_headers_with_anthropic_beta(
+            headers=headers,
+            optional_params={"_original_model": "deepseek-v4-flash[1m]"},
+        )
+        assert "context-1m-2025-08-07" in headers.get("anthropic-beta", "")
+
+    def test_update_headers_anthropic_beta_no_context_1m_without_suffix(self):
+        from litellm.llms.anthropic.messages.native.transformation import (
+            AnthropicMessagesConfig,
+        )
+
+        config = AnthropicMessagesConfig()
+        headers = {}
+        headers = config._update_headers_with_anthropic_beta(
+            headers=headers,
+            optional_params={},
+        )
+        assert "context-1m-2025-08-07" not in headers.get("anthropic-beta", "")

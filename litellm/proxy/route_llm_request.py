@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import re
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -272,6 +273,8 @@ REQUIRED_ONE_OF_BODY_PARAMS_BY_ROUTE: Final[Mapping[str, tuple[str, str]]] = Map
 )
 
 JSON_OBJECT_ADAPTER: Final[TypeAdapter[dict[str, object]]] = TypeAdapter(dict[str, object])
+_PROXY_INTERNAL_ROUTING_MARKERS: Final = frozenset({"_route_type"})
+_ONE_M_CONTEXT_SUFFIX: Final = re.compile(r"\[1m\]$", re.IGNORECASE)
 _OPTIONAL_JSON_OBJECT_ADAPTER: Final[TypeAdapter[Mapping[str, object] | None]] = TypeAdapter(
     Mapping[str, object] | None
 )
@@ -801,14 +804,35 @@ async def _route_request_single_attempt(  # noqa: ANN202  # returns unawaited pr
 
     raise_if_mock_testing_params_disallowed(data, allowed=mock_testing_params_allowed())
 
+    # Propagate route_type so downstream filters (protocol_routing) can inspect
+    # the incoming protocol without changing existing function signatures.
+    # Only inject for route types the protocol filter understands; every other
+    # route (containers, video, evals, vector stores, ...) would carry the
+    # marker straight through to the provider since it never passes the
+    # router's protocol filter.
+    from litellm.protocol_routing._types import ROUTE_TYPE_TO_PROTOCOL
+
+    if route_type in ROUTE_TYPE_TO_PROTOCOL:
+        data["_route_type"] = route_type  # rebind-ok: the proxy request body is the shared mutable dict contract
+    elif "_route_type" in data:
+        del data["_route_type"]  # rebind-ok: the proxy request body is the shared mutable dict contract
+
     def direct_litellm_kwargs() -> Mapping[str, object]:
         return MappingProxyType(
             {
                 key: value
                 for key, value in JSON_OBJECT_ADAPTER.validate_python(data).items()
-                if key not in router_only_settings_from_override
+                if key not in router_only_settings_from_override and key not in _PROXY_INTERNAL_ROUTING_MARKERS
             }
         )
+
+    # Strip [1m]/[1M] suffix from model name for routing.
+    # The suffix signals 1M context support; the actual header injection
+    # happens in the Anthropic handler via _original_model.
+    requested_model: Final = JSON_OBJECT_ADAPTER.validate_python(data).get("model")
+    if isinstance(requested_model, str) and _ONE_M_CONTEXT_SUFFIX.search(requested_model):
+        data["_original_model"] = requested_model  # rebind-ok: shared request dict contract
+        data["model"] = _ONE_M_CONTEXT_SUFFIX.sub("", requested_model)  # rebind-ok: route on the bare name
 
     team_id: Final = get_team_id_from_data(data)
     router_model_names: Final = llm_router.registry().names(kind="group_set") if llm_router is not None else []

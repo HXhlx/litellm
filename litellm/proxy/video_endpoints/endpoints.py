@@ -283,7 +283,9 @@ async def video_status(
     if custom_llm_provider:
         data["custom_llm_provider"] = custom_llm_provider
 
-    resolved_model: Final = video_model_group(decoded, llm_router)
+    resolved_model: Final = (
+        video_model_group(decoded, llm_router) or model_id_from_decoded or request.query_params.get("model")
+    )
     if resolved_model:
         data["model"] = resolved_model
 
@@ -374,6 +376,7 @@ async def video_content(
 
     decoded: Final = decode_video_id_with_provider(video_id)
     provider_from_id: Final = decoded.get("custom_llm_provider")
+    model_id_from_decoded: Final = decoded.get("model_id")
 
     custom_llm_provider: Final = (
         get_custom_llm_provider_from_request_headers(request=request)
@@ -384,7 +387,9 @@ async def video_content(
     if custom_llm_provider:
         data["custom_llm_provider"] = custom_llm_provider
 
-    resolved_model: Final = video_model_group(decoded, llm_router)
+    resolved_model: Final = (
+        video_model_group(decoded, llm_router) or model_id_from_decoded or request.query_params.get("model")
+    )
     if resolved_model:
         data["model"] = resolved_model
     # Process request using ProxyBaseLLMRequestProcessing

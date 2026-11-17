@@ -6244,6 +6244,7 @@ def completion(
             tpm=kwargs.get("tpm"),
             rpm=kwargs.get("rpm"),
             use_xai_oauth=kwargs.get("use_xai_oauth", False),
+            xai_oauth_token_file=kwargs.get("xai_oauth_token_file"),  # pyright: ignore[reportUnknownMemberType]  # kwargs is the untyped request dict
             chatgpt_auth_file=routing_kwargs.get("chatgpt_auth_file"),
             gigachat_scope=kwargs.get("gigachat_scope"),
             gigachat_auth_url=kwargs.get("gigachat_auth_url"),
